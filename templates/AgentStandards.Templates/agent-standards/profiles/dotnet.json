@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "dotnet",
+  "displayName": ".NET",
+  "description": "General .NET applications and solutions (C#, F#, VB).",
+  "extends": ["generic"],
+  "detect": {
+    "any": [
+      { "file": "**/*.csproj" },
+      { "file": "**/*.fsproj" },
+      { "file": "**/*.vbproj" },
+      { "file": "**/*.sln" },
+      { "file": "**/*.slnx" }
+    ]
+  },
+  "standards": ["dotnet"],
+  "rules": ["csharp", "msbuild"],
+  "skills": ["analyze-dotnet-build"],
+  "agents": []
+}

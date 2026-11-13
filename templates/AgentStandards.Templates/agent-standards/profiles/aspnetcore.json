@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "aspnetcore",
+  "displayName": "ASP.NET Core",
+  "description": "ASP.NET Core web applications (MVC, Razor Pages, minimal hosting).",
+  "extends": ["dotnet"],
+  "detect": {
+    "any": [
+      { "file": "**/*.csproj", "contains": "Microsoft.NET.Sdk.Web" }
+    ]
+  },
+  "standards": ["aspnetcore"],
+  "rules": ["aspnetcore-hosting"],
+  "skills": [],
+  "agents": []
+}

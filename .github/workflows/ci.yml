@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+jobs:
+  build:
+    name: Build and test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Restore
+        run: dotnet restore AgentStandards.slnx
+
+      - name: Build
+        run: dotnet build AgentStandards.slnx -c Release --no-restore
+
+      - name: Validate templates
+        run: dotnet run --project src/AgentStandards.Tool -c Release --no-build -- validate --templates templates/AgentStandards.Templates/agent-standards
+
+      - name: Pack
+        run: dotnet pack AgentStandards.slnx -c Release --no-build -o artifacts/packages
+
+      - name: Test
+        env:
+          AGENT_STANDARDS_PACKAGES: ${{ github.workspace }}/artifacts/packages
+        run: dotnet test AgentStandards.slnx -c Release --no-build --logger "trx;LogFilePrefix=${{ matrix.os }}" --results-directory artifacts/test-results
+
+      - name: Validate packages (install tool, offline end-to-end)
+        run: scripts/e2e.sh
+
+      - name: Upload packages
+        if: matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: artifacts/packages/
+          if-no-files-found: error
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: artifacts/test-results/

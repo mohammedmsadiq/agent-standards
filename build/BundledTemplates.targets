@@ -1,0 +1,21 @@
+<Project>
+  <!-- Copies the standards templates (and a bundle.json describing their version) next to the build output. -->
+  <ItemGroup>
+    <None Include="$(MSBuildThisFileDirectory)..\templates\AgentStandards.Templates\agent-standards\**\*"
+          Link="templates\agent-standards\%(RecursiveDir)%(Filename)%(Extension)"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Pack="false" />
+  </ItemGroup>
+
+  <Target Name="WriteTemplateBundleInfo" BeforeTargets="AssignTargetPaths">
+    <PropertyGroup>
+      <_BundleInfoPath>$(IntermediateOutputPath)bundle.json</_BundleInfoPath>
+      <_BundleVersion>$(PackageVersion)</_BundleVersion>
+      <_BundleVersion Condition="'$(_BundleVersion)' == ''">$(Version)</_BundleVersion>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(_BundleInfoPath)" Lines="{ &quot;packageId&quot;: &quot;AgentStandards.Templates&quot;, &quot;version&quot;: &quot;$(_BundleVersion)&quot; }" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <None Include="$(_BundleInfoPath)" Link="templates\bundle.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" Pack="false" />
+      <FileWrites Include="$(_BundleInfoPath)" />
+    </ItemGroup>
+  </Target>
+</Project>

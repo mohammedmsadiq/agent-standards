@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "classlib",
+  "displayName": ".NET class library",
+  "description": "Reusable .NET libraries and NuGet packages.",
+  "extends": ["dotnet"],
+  "detect": {
+    "any": [
+      { "file": "**/*.csproj" }
+    ],
+    "none": [
+      { "file": "**/*.csproj", "contains": "<OutputType>Exe</OutputType>" },
+      { "file": "**/*.csproj", "contains": "<OutputType>WinExe</OutputType>" },
+      { "file": "**/*.csproj", "contains": "Microsoft.NET.Sdk.Web" },
+      { "file": "**/*.csproj", "contains": "Microsoft.NET.Sdk.BlazorWebAssembly" },
+      { "file": "**/*.csproj", "contains": "Microsoft.NET.Sdk.Razor" },
+      { "file": "**/*.csproj", "contains": "<UseMaui>true</UseMaui>" },
+      { "file": "**/*.csproj", "contains": "Microsoft.NET.Sdk.Worker" }
+    ]
+  },
+  "standards": ["dotnet-libraries"],
+  "rules": ["library-public-api"],
+  "skills": ["review-public-api"],
+  "agents": []
+}

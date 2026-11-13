@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Content-only package. Templates live under 'agent-standards/' (NOT content/ or contentFiles/), so referencing this
+    package never injects files into a consuming project. The agent-standards CLI reads the .nupkg directly.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <PackageId>AgentStandards.Templates</PackageId>
+    <Title>Agent Standards templates</Title>
+    <Description>Versioned, vendor-neutral engineering standards, skills, specialist agents and project profiles (generic, dotnet, maui, aspnetcore, webapi, blazor, classlib) consumed by the agent-standards CLI (AgentStandards.Tool). Contains no code and adds nothing to a project that references it.</Description>
+    <IncludeBuildOutput>false</IncludeBuildOutput>
+    <IncludeSymbols>false</IncludeSymbols>
+    <DevelopmentDependency>true</DevelopmentDependency>
+    <SuppressDependenciesWhenPacking>true</SuppressDependenciesWhenPacking>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <NoWarn>$(NoWarn);NU5128</NoWarn>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="agent-standards\**\*" Pack="true" PackagePath="agent-standards\" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+</Project>

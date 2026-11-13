@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "blazor",
+  "displayName": "Blazor",
+  "description": "Blazor web applications (server, WebAssembly or auto render modes).",
+  "extends": ["dotnet"],
+  "detect": {
+    "any": [
+      { "file": "**/*.csproj", "contains": "Microsoft.NET.Sdk.BlazorWebAssembly" },
+      { "file": "**/*.razor" }
+    ],
+    "none": [
+      { "file": "**/*.csproj", "contains": "<UseMaui>true</UseMaui>" }
+    ]
+  },
+  "standards": ["blazor", "accessibility"],
+  "rules": ["blazor-components"],
+  "skills": ["review-blazor-component"],
+  "agents": []
+}

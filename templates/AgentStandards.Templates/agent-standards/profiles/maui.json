@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "maui",
+  "displayName": ".NET MAUI",
+  "description": ".NET MAUI cross-platform mobile and desktop applications.",
+  "extends": ["dotnet"],
+  "detect": {
+    "any": [
+      { "file": "**/*.csproj", "contains": "<UseMaui>true</UseMaui>" }
+    ]
+  },
+  "standards": ["maui"],
+  "rules": ["maui-xaml", "maui-platforms"],
+  "skills": ["review-maui-page"],
+  "agents": ["maui-architect"]
+}

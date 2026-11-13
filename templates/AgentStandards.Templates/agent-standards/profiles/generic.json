@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "generic",
+  "displayName": "Generic",
+  "description": "Language-agnostic engineering standards, skills and agents for any repository.",
+  "extends": [],
+  "standards": [
+    "ai-agent-autonomy", "architecture", "coding-conventions", "dependency-management", "security", "testing",
+    "error-handling", "logging-observability", "performance", "accessibility", "documentation", "code-review",
+    "version-control", "ci-cd", "new-projects", "existing-projects"
+  ],
+  "rules": ["tests"],
+  "skills": [
+    "review-code", "investigate-bug", "write-tests", "refactor-code", "review-security", "review-performance",
+    "document-architecture", "review-dependencies", "create-feature", "review-pull-request"
+  ],
+  "agents": [
+    "software-architect", "code-reviewer", "security-reviewer", "performance-engineer", "test-engineer",
+    "documentation-engineer", "migration-specialist"
+  ]
+}

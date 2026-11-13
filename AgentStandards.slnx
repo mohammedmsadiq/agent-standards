@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AgentStandards.Core/AgentStandards.Core.csproj" />
+    <Project Path="src/AgentStandards.Tool/AgentStandards.Tool.csproj" />
+  </Folder>
+  <Folder Name="/templates/">
+    <Project Path="templates/AgentStandards.Templates/AgentStandards.Templates.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AgentStandards.Tests/AgentStandards.Tests.csproj" />
+  </Folder>
+</Solution>

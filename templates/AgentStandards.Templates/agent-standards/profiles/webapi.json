@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "webapi",
+  "displayName": "Web API",
+  "description": "REST/HTTP API services built with ASP.NET Core.",
+  "extends": ["aspnetcore"],
+  "detect": {
+    "all": [
+      { "file": "**/*.csproj", "contains": "Microsoft.NET.Sdk.Web" }
+    ],
+    "any": [
+      { "file": "**/*.csproj", "contains": "Microsoft.AspNetCore.OpenApi" },
+      { "file": "**/*.csproj", "contains": "Swashbuckle" },
+      { "file": "**/*.cs", "contains": "[ApiController]" },
+      { "file": "**/Program.cs", "contains": "MapGet(" }
+    ]
+  },
+  "standards": ["webapi"],
+  "rules": ["api-endpoints"],
+  "skills": ["design-api-endpoint"],
+  "agents": ["api-designer"]
+}

@@ -1,0 +1,63 @@
+# Optional Azure DevOps pipeline: restore, build, validate templates, pack, test, end-to-end package check, publish
+# build artefacts. It never publishes to NuGet.org; see docs/publishing.md for a manual, approved release.
+trigger:
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: ['*']
+
+strategy:
+  matrix:
+    linux:
+      vmImage: ubuntu-latest
+    windows:
+      vmImage: windows-latest
+    macos:
+      vmImage: macOS-latest
+
+pool:
+  vmImage: $(vmImage)
+
+variables:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - task: UseDotNet@2
+    displayName: Install .NET SDK from global.json
+    inputs:
+      useGlobalJson: true
+
+  - bash: dotnet restore AgentStandards.slnx
+    displayName: Restore
+
+  - bash: dotnet build AgentStandards.slnx -c Release --no-restore
+    displayName: Build
+
+  - bash: dotnet run --project src/AgentStandards.Tool -c Release --no-build -- validate --templates templates/AgentStandards.Templates/agent-standards
+    displayName: Validate templates
+
+  - bash: dotnet pack AgentStandards.slnx -c Release --no-build -o artifacts/packages
+    displayName: Pack
+
+  - bash: AGENT_STANDARDS_PACKAGES="$(Build.SourcesDirectory)/artifacts/packages" dotnet test AgentStandards.slnx -c Release --no-build --logger trx --results-directory artifacts/test-results
+    displayName: Test
+
+  - task: PublishTestResults@2
+    condition: always()
+    inputs:
+      testResultsFormat: VSTest
+      testResultsFiles: artifacts/test-results/*.trx
+
+  - bash: scripts/e2e.sh
+    displayName: Validate packages (install tool, offline end-to-end)
+
+  - task: PublishPipelineArtifact@1
+    condition: eq(variables['Agent.OS'], 'Linux')
+    inputs:
+      targetPath: artifacts/packages
+      artifact: packages

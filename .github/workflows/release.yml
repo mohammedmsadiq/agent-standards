@@ -1,0 +1,62 @@
+name: Release to NuGet.org
+
+# Publishing is a separate, manual, explicitly approved operation:
+#  - it only runs when someone starts it from the Actions tab;
+#  - the job uses the protected 'nuget-org' environment (configure required reviewers in repository settings);
+#  - the API key is the NUGET_API_KEY secret of that environment, never stored in the repository.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact package version being released (must match Directory.Build.props, e.g. 0.1.0-preview.1)
+        required: true
+      confirm:
+        description: Type "publish" to confirm publishing to NuGet.org
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    if: inputs.confirm == 'publish'
+    runs-on: ubuntu-latest
+    environment: nuget-org
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Build, test and pack
+        run: |
+          dotnet build AgentStandards.slnx -c Release
+          dotnet run --project src/AgentStandards.Tool -c Release --no-build -- validate --templates templates/AgentStandards.Templates/agent-standards
+          dotnet pack AgentStandards.slnx -c Release --no-build -o artifacts/packages
+          AGENT_STANDARDS_PACKAGES="$PWD/artifacts/packages" dotnet test AgentStandards.slnx -c Release --no-build
+          scripts/e2e.sh
+
+      - name: Check version
+        run: |
+          test -f "artifacts/packages/AgentStandards.Tool.${{ inputs.version }}.nupkg"
+          test -f "artifacts/packages/AgentStandards.Templates.${{ inputs.version }}.nupkg"
+
+      - name: Push to NuGet.org
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          test -n "$NUGET_API_KEY" || { echo "NUGET_API_KEY is not configured for the nuget-org environment" >&2; exit 1; }
+          # Templates first, so the tool never references a templates version that is not yet available.
+          dotnet nuget push "artifacts/packages/AgentStandards.Templates.${{ inputs.version }}.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          dotnet nuget push "artifacts/packages/AgentStandards.Tool.${{ inputs.version }}.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: released-packages
+          path: artifacts/packages/

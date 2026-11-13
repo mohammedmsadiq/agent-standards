@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>AgentStandards.Core</RootNamespace>
+    <!-- Internal engine shipped inside the tool; not published as a separate package. -->
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="NuGet.Protocol" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="AgentStandards.Tests" />
+  </ItemGroup>
+</Project>
