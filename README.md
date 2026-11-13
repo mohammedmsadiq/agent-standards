@@ -20,7 +20,10 @@ others. It is distributed as a .NET tool, but it manages repositories in any lan
 - **Profiles:** `generic`, `dotnet`, `maui`, `aspnetcore`, `webapi`, `blazor`, `classlib` — extensible through a JSON
   schema without engine changes. Non-.NET repositories get only the generic profile.
 - **Safe updates:** a manifest records every managed file and its hash. Local edits are never overwritten without
-  `--force`; unknown files are never touched; obsolete files are removed only with `--prune`.
+  `--force`; unknown files are never touched; obsolete files are removed only with `--prune`. Conflicts stay visible
+  until you resolve them.
+- **Transactional:** every change is backed up first and applied as one unit; a failure part-way is reverted
+  automatically, and an interrupted run is detected and recoverable with `rollback`.
 - **Dry-run, diff, rollback and version pinning**, project and global (per-user) scopes.
 - **Offline:** the tool bundles the templates matching its version; other versions come from your NuGet sources, a
   local folder or the NuGet global packages folder.
@@ -65,6 +68,7 @@ agent-standards init --profile dotnet --exclude skill:review-performance,agent:m
 agent-standards update --dry-run
 agent-standards diff
 agent-standards list profiles
+agent-standards resolve --all
 agent-standards rollback --dry-run
 agent-standards init --global       # personal standards for Claude Code and Copilot
 ```
@@ -84,7 +88,7 @@ agent-standards init --global       # personal standards for Claude Code and Cop
 | `.github/instructions/*.instructions.md` | GitHub Copilot | Path-specific instructions (`applyTo:` frontmatter) |
 | `.github/skills/<name>/SKILL.md` | GitHub Copilot | Agent skills |
 | `.github/agents/<name>.agent.md` | GitHub Copilot | Custom agents; review agents limited to `['read', 'search']` |
-| `.mcp.json` | both | Only with `--mcp` and only when a profile declares servers |
+| `.mcp.json` | Claude Code | Only with `--mcp`, the `claude` adapter, and a profile that declares servers. Existing servers are never changed. |
 
 Existing files are preserved. For `AGENTS.md`, `CLAUDE.md` and `copilot-instructions.md`, the tool appends a
 clearly marked managed block and never changes content outside it. See
@@ -94,7 +98,7 @@ clearly marked managed block and never changes content outside it. See
 
 | Assistant | Project scope | Global scope (`--global`) |
 |---|---|---|
-| Claude Code (`claude`) | `CLAUDE.md`, `.claude/` | `~/.claude/CLAUDE.md`, `~/.claude/{rules,skills,agents}` |
+| Claude Code (`claude`) | `CLAUDE.md`, `.claude/`, optional `.mcp.json` | `~/.claude/CLAUDE.md`, `~/.claude/{rules,skills,agents}` |
 | GitHub Copilot (`copilot`) | `.github/` | `~/.copilot/copilot-instructions.md`, `~/.copilot/{instructions,skills,agents}` |
 
 Other assistants that read `AGENTS.md` benefit from the shared content without an adapter. New adapters implement
@@ -135,8 +139,8 @@ all assistants, bundled templates).
 
 - **Project context:** fill in the *Project context* section that `init` adds below the managed block in a new
   `AGENTS.md` (architecture, commands, conventions, decisions, known issues, overrides). It is never modified.
-- **Edit any generated file.** Edits are detected; `update` keeps them and saves the incoming version under
-  `.agent-standards/conflicts/` for you to merge.
+- **Edit any generated file.** Edits are detected and kept; when the template also changes, `update` reports a
+  conflict and saves the incoming version for you to merge (see [Resolving conflicts](#resolving-conflicts)).
 - **Choose content:** `--profile`, `--assistants`, `--exclude standard:|rule:|skill:|agent:NAME`. Choices are
   remembered in the manifest.
 - **Your own standards:** copy `templates/AgentStandards.Templates/agent-standards`, change it, and use
@@ -164,18 +168,36 @@ agent-standards update             # apply
 agent-standards update --prune     # also remove files the templates no longer provide (unmodified ones only)
 ```
 
-For each managed file `update` compares the recorded hash, the file on disk and the new template:
+For each managed file `update` compares the last applied template (baseline), the file on disk and the new template:
 
 | On disk | Template | Result |
 |---|---|---|
 | unchanged | changed | updated |
 | modified | unchanged | kept |
-| modified | changed | **conflict**: local kept, incoming saved to `.agent-standards/conflicts/<path>`, exit code 2 |
+| modified | changed | **conflict**: local kept, see below; exit code 2 |
+| equal to the new template | — | adopted (clears any conflict) |
 | deleted | any | left deleted (`--force` restores) |
 | unmanaged file at a target path | — | **conflict**: left untouched (`--force` replaces it, with a backup) |
 
-Line-ending differences do not count as modifications. The tool does not perform automatic line-level merges;
-conflict copies are the documented alternative.
+Line-ending differences do not count as modifications. `--force` replaces modified and unmanaged files with the
+template version (after a backup) and clears conflicts; it never touches content outside managed blocks.
+
+## Resolving conflicts
+
+A conflict keeps your local file and saves, under `.agent-standards/conflicts/`:
+
+- `<path>.incoming` — the new template version;
+- `<path>.base` — the previously applied version, when it can be rebuilt offline (bundled, cached or directory templates).
+
+The conflict stays pending — shown by `status`, `doctor` and `validate`, and every `update` exits with code 2 — until:
+
+- you merge what you want from `.incoming` into your file and run `agent-standards resolve <path>` (or
+  `resolve --all`); your file becomes the accepted version and the copies are removed; or
+- your file ends up identical to the incoming version (resolved automatically on the next `update`); or
+- the template returns to the previously applied version; or
+- you run `update --force` to take the template version.
+
+Unmanaged files that block an install cannot be "resolved"; rename or remove them, or use `--force`.
 
 ## Versioning
 
@@ -187,19 +209,29 @@ conflict copies are the documented alternative.
   `--version latest` resolves the newest version from your sources and unpins.
 - Template sets carry a `schemaVersion`; the tool refuses a schema it does not understand.
 
-## Rollback
+## Backups, rollback and recovery
 
-Every `init`/`update` that changes files first saves a backup under `.agent-standards/backups/` (the last 10 are
-kept; the folder is git-ignored).
+Every operation that changes files (`init`, `update`, `resolve`, `rollback`) first saves a complete backup under
+`.agent-standards/backups/` (the newest 10 are kept; the folder is git-ignored), then writes a journal
+(`.agent-standards/operation.json`), applies all changes, and removes the journal.
+
+- **A failure while writing** (permissions, disk full, a locked file) reverts every change automatically; the
+  command exits 1 and says so.
+- **If the process is killed** part-way, the journal remains. `status` and `validate` exit 1, `doctor` reports it,
+  and `init`/`update` refuse to run until you recover with `agent-standards rollback`.
+- **If the journal's backup is missing**, check the files with `git status`, restore from version control if needed,
+  then delete `.agent-standards/operation.json`.
 
 ```bash
 agent-standards rollback --list
-agent-standards rollback --dry-run
-agent-standards rollback --yes          # undo the most recent operation
+agent-standards rollback --dry-run      # exactly the actions rollback will take
+agent-standards rollback --yes          # undo the most recent operation (or recover an interrupted one)
 agent-standards rollback --to <id> --yes
 ```
 
-Files changed after the operation are left alone unless you add `--force`.
+Files you changed after the operation are kept (`skip-modified`) and stay tracked against the version they are
+based on, so the manifest always describes the files on disk; such a partial rollback exits 2. `--force` reverts
+those files too (a safety backup is taken first). Rollback itself is transactional.
 
 ## Offline usage
 
@@ -215,28 +247,36 @@ Files changed after the operation are left alone unless you add `--force`.
 - The tool refuses to write through symbolic links or junctions, and refuses symlinks in template sources and
   package entries.
 - Packages are read in memory with entry-size and count limits and identity checks; nothing is extracted to disk.
-- Writes are atomic; every change is backed up first; `--dry-run`, `diff`, `status`, `validate`, `list` and
-  `doctor` do not write.
+- Writes are atomic and transactional; every change is backed up first; a file edited between planning and
+  applying aborts the operation; `--dry-run`, `diff`, `status`, `validate`, `list` and `doctor` do not write.
+- Template sources with duplicate or case-colliding paths, malformed zips and oversized entries are rejected.
 - Nothing is deleted without `--prune` (or `rollback`), and only files whose content is unchanged.
+- Project installs never write to `~/.claude` or `~/.copilot`.
 - No credentials, tokens, machine paths or private addresses are bundled. Template validation rejects MCP servers
   with literal secrets or absolute command paths. Existing `.mcp.json` entries are never modified.
 - The generated instructions guide assistants; they are not an enforcement mechanism. Configure each assistant's
   permission settings for hard limits.
 
-Exit codes: `0` success, `1` error or validation failure, `2` completed with conflicts that need attention.
+Exit codes: `0` success; `1` error, validation failure or interrupted operation; `2` completed but needs attention
+(unresolved conflicts, partial rollback).
 
 ## Limitations
 
-- No automatic line-level three-way merge; conflicts produce a copy for manual merging.
-- Global scope writes to `~/.claude` and `~/.copilot` (or under `AGENT_STANDARDS_HOME`); the `CLAUDE_CONFIG_DIR`
-  and `COPILOT_HOME` overrides are not read.
-- No MCP servers are bundled. `.mcp.json` at the repository root is read by Claude Code; VS Code Copilot reads it
-  only with an experimental setting, and `.vscode/mcp.json` is not generated.
+- No automatic line-level three-way merge; conflicts produce `.incoming`/`.base` copies for manual merging.
+- Global scope always writes to `~/.claude` and `~/.copilot` (or under `AGENT_STANDARDS_HOME`). `CLAUDE_CONFIG_DIR`
+  and `COPILOT_HOME` are not followed because the assistants do not document them consistently for instructions,
+  skills and agents; `doctor` warns when they are set. Project installs in the home directory are refused because
+  they would modify the global configuration.
+- No MCP servers are bundled. Only Claude Code's `.mcp.json` is generated; Copilot MCP configuration is not.
 - Copilot surfaces that do not read `AGENTS.md` see the core policy from `copilot-instructions.md` but not the
   project-context section. Links to detailed standards are read on demand; assistants do not guarantee they load
   linked files.
 - Skills and agents are rendered once per assistant folder, so enabling both adapters writes two copies.
 - Rewriting `.mcp.json` to add servers normalises its formatting (a backup is kept).
+- Project detection scans six directory levels and up to 20,000 files and skips build, dependency and VCS folders;
+  `doctor` reports when the limit is reached. Use `--profile` to override.
+- Conflict copies are git-ignored, so a pending conflict recorded in a committed manifest has no copy on another
+  machine; re-run `update` there to regenerate it.
 - No package icon yet.
 
 ## Building from source

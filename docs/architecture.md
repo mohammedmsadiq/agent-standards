@@ -65,23 +65,43 @@ TemplateResolver ──► TemplateSet ──► ProfileResolver (extends, exclu
 
 ## Update algorithm
 
-For each rendered file, with `B` = hash recorded in the manifest, `L` = hash on disk, `N` = hash of the new
-template content:
+For each rendered file, with `B` = baseline hash recorded in the manifest (last applied template), `P` = pending
+incoming hash (set while a conflict is unresolved), `L` = hash on disk and `N` = hash of the new template content:
 
 | Condition | Action |
 |---|---|
 | no entry, no file | create |
 | no entry, file equals `N` | adopt (start tracking) |
-| no entry, file differs | conflict, untouched (`--force`: overwrite with backup) |
-| `L = B`, `N = B` | unchanged |
-| `L = B`, `N ≠ B` | update |
-| `L ≠ B`, `L = N` | adopt |
-| `L ≠ B`, `N = B` | keep local |
-| `L ≠ B`, `N ≠ B` | conflict: keep local, write incoming to `.agent-standards/conflicts/<path>`, record `N` as the new baseline so the conflict is reported once (`--force`: overwrite with backup) |
+| no entry, file differs | conflict, untouched, `.incoming` copy written (`--force`: overwrite with backup) |
+| `L = N` | unchanged, or adopt and clear `P` |
+| `L = B` | update to `N`, clear `P` |
+| `N = B` | keep local, clear `P` and remove stale conflict copies |
+| otherwise, `--force` | overwrite with `N` (backup kept), clear `P` |
+| otherwise | conflict: keep local, keep `B`, set `P = N`, write `<path>.incoming` and (if the previous template set can be rebuilt offline) `<path>.base` |
 | entry, file deleted | leave deleted (`--force`: restore) |
+
+`agent-standards resolve` sets `B = P` and clears `P` (the local file is accepted as the merge result). Because `B`
+is kept until then, an unresolved conflict is reported on every update instead of disappearing after the first.
 
 Managed paths that the new templates no longer produce are reported as *obsolete*. With `--prune`, unmodified ones
 are deleted (or their block removed) and modified ones are untracked but kept.
+
+## Transactions and recovery
+
+`InstallPlanner.BuildFileChanges` turns the plan into concrete file changes (managed files, conflict copies, the
+manifest), dropping no-op writes. `Transaction.Run` then:
+
+1. verifies every file still has the content it had when planned (otherwise aborts without writing);
+2. saves the original content of every file it will change, then `backup.json` (so a backup only exists once
+   complete);
+3. writes the journal `.agent-standards/operation.json`;
+4. applies the changes (each one atomically: temporary file + rename);
+5. deletes the journal.
+
+If step 4 throws, all changes are restored from the backup, the backup is removed and the command fails with a clear
+message. If the process dies, the journal remains: `init`/`update`/`resolve` refuse to run and `rollback` restores
+the journal's backup. Files the interrupted run never reached already have their original content and are reported
+as `already-restored`.
 
 ## Manifest
 
@@ -93,10 +113,12 @@ computed on demand by `status` rather than stored. A corrupt or newer-schema man
 
 ## Backups and rollback
 
-Before writing, the executor stores the previous content of every file it will change, the list of files it
-creates (with the hash it writes), and the previous manifest under `.agent-standards/backups/<timestamp>-<op>/`.
-`rollback` restores changed files, deletes created files, and restores the manifest — skipping any file that changed
-after the operation unless `--force` is given — then removes that backup. The newest 10 backups are kept.
+A backup records, for each changed file, whether it existed, its original content and the hash written. `rollback`
+classifies each file: already at its original content → nothing to do; still as written → restore or delete;
+changed since → kept (`skip-modified`) unless `--force`. The resulting manifest is the previous manifest, except that
+kept files keep the entry describing their current baseline, so tracking matches the files on disk (a partial
+rollback exits 2). Rollback runs as a transaction with an internal safety backup; on success both backups are
+removed, so repeated `rollback` steps further back. The newest 10 backups are kept.
 
 ## Path safety
 

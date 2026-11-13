@@ -16,7 +16,8 @@ Sources: <https://code.claude.com/docs/en/memory>, <https://code.claude.com/docs
 | `.claude/rules/*.md` (and `~/.claude/rules/`) with optional `paths:` list of globs; rules without `paths` always load. | Rules render with a `paths:` list. |
 | Skills: `.claude/skills/<name>/SKILL.md`, `~/.claude/skills/`; frontmatter `description` recommended, `name` defaults to the folder. | Skills keep `name` = folder and a `description`. |
 | Subagents: `.claude/agents/*.md`, `~/.claude/agents/`; `name` and `description` required; `tools` is a comma-separated allowlist. | Read-only agents get `tools: Read, Grep, Glob` (no Bash, Edit or Write). Read-write agents inherit tools. |
-| Project MCP servers: `.mcp.json` with `mcpServers`; `${VAR}` expansion; user approval for project servers. | `--mcp` merges profile-declared servers into `.mcp.json`, add-only. User-level MCP settings are never touched. |
+| Project MCP servers: `.mcp.json` with `mcpServers`; `${VAR}` expansion; user approval for project servers. | `--mcp` merges profile-declared servers into `.mcp.json` (Claude adapter only), add-only; existing servers with the same name are kept and reported. User-level MCP settings are never touched. |
+| `CLAUDE_CONFIG_DIR` relocates settings, session history and plugins ([env vars](https://code.claude.com/docs/en/env-vars)); the memory, skills and subagent pages document `~/.claude` paths without mentioning it. | Global installs keep writing to `~/.claude`; `doctor` warns when the variable is set. |
 
 ## GitHub Copilot (`copilot`)
 
@@ -35,7 +36,8 @@ Sources: <https://docs.github.com/en/copilot/how-tos/configure-custom-instructio
 | Custom agents: `.github/agents/*.agent.md`; `description` required; `tools` list using aliases such as `read`, `search`, `edit`, `execute`. `.chatmode.md` is legacy. | Read-only agents get `tools: ['read', 'search']`. |
 | Skills: `.github/skills/<name>/SKILL.md`, personal `~/.copilot/skills/`; `name` lowercase letters, digits and hyphens, ≤ 64 characters, equal to the folder; `description` ≤ 1024 characters. | `validate` enforces these rules for all skills. |
 | Personal instructions: `~/.copilot/copilot-instructions.md`, `~/.copilot/instructions/**/*.instructions.md`; personal agents `~/.copilot/agents`. | Global scope writes to these locations. |
-| Workspace-root `.mcp.json` is read by VS Code only behind an experimental setting; `.vscode/mcp.json` is the legacy editor format. | `.mcp.json` is shared with Claude Code; `.vscode/mcp.json` is not generated. |
+| VS Code's native MCP files are `~/.copilot/mcp-config.json` and a workspace-root `.mcp.json` behind an experimental setting; `.vscode/mcp.json` (`servers` schema) is the legacy editor format. | No Copilot MCP configuration is generated; `--mcp` without the Claude adapter says so. |
+| `COPILOT_HOME` relocates Copilot CLI's `~/.copilot` folder ([CLI config directory](https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-dir-reference)); VS Code documents it only for `mcp-config.json` and reads personal instructions, skills and agents from `~/.copilot`. | Global installs keep writing to `~/.copilot` (what VS Code reads); `doctor` warns when the variable is set. |
 
 ## Other assistants
 

@@ -225,7 +225,7 @@ public static class InstallationValidator
                 continue;
             }
 
-            var state = StatusService.GetState(root, file);
+            var state = StatusService.GetState(root, file, ignorePending: true);
             if (state == FileState.Malformed)
                 issues.Add(new(Severity.Error, file.Path, "managed block markers or JSON are malformed"));
             if (state == FileState.BlockMissing)
@@ -242,8 +242,10 @@ public static class InstallationValidator
                 issues.AddRange(FileValidators.CheckImports(root, home, file.Path, content, Severity.Error));
         }
 
-        foreach (var conflict in StatusService.PendingConflicts(root))
-            issues.Add(new(Severity.Warning, conflict, "pending conflict copy: merge it into the original file and delete the copy"));
+        foreach (var pending in ConflictService.Pending(manifest))
+            issues.Add(new(Severity.Warning, pending.Path, "unresolved conflict: merge the incoming copy, then run 'agent-standards resolve'"));
+        if (OperationJournal.Read(root) is { } journal)
+            issues.Add(new(Severity.Error, OperationJournal.RelativePath, $"interrupted '{journal.Operation}' operation; run 'agent-standards rollback'"));
 
         if (manifest.Scope == InstallScope.Project && manifest.Assistants.Contains("claude"))
         {

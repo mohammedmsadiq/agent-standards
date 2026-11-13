@@ -19,7 +19,8 @@ public enum PlanActionKind
     Adopt,
     /// <summary>Local modification kept; the template did not change.</summary>
     KeepLocal,
-    /// <summary>Local modification kept; the new template version was saved under .agent-standards/conflicts/.</summary>
+    /// <summary>Local modification kept; the new template version is saved under .agent-standards/conflicts/ and the
+    /// conflict stays pending until resolved (<c>agent-standards resolve</c>) or the local file matches the template.</summary>
     Conflict,
     /// <summary>Managed file deleted by the user; left deleted.</summary>
     SkipDeleted,
@@ -48,6 +49,8 @@ public sealed class PlanAction
     public string? Incoming { get; init; }
     /// <summary>Manifest entry to record after the operation; null means the path is not tracked.</summary>
     public ManifestFile? Entry { get; init; }
+    /// <summary>Conflict only: the previously applied template content, when it could be reconstructed.</summary>
+    public string? BaseContent { get; set; }
 
     public bool Writes => After is not null && Kind is PlanActionKind.Create or PlanActionKind.Update or PlanActionKind.Merge
         or PlanActionKind.Overwrite or PlanActionKind.Restore or PlanActionKind.RemoveBlock;
@@ -62,8 +65,9 @@ public sealed class InstallPlan
     public required IReadOnlyList<PlanAction> Actions { get; init; }
     public required Manifest Manifest { get; init; }
     public string? PreviousManifestText { get; init; }
+    /// <summary>Every file the operation writes or deletes, including conflict copies and the manifest.</summary>
+    public required IReadOnlyList<FileChange> Changes { get; init; }
 
     public bool HasConflicts => Actions.Any(a => a.Kind == PlanActionKind.Conflict);
-    public bool HasChanges => Actions.Any(a => a.Writes || a.Deletes || a.Kind == PlanActionKind.Conflict) ||
-                              PreviousManifestText != ManifestStore.Serialize(Manifest);
+    public bool HasChanges => Changes.Count > 0;
 }

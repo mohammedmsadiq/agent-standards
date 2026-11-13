@@ -80,28 +80,87 @@ public static class InstallPlanner
         return ThreeWay(Make, currentHash, old, newHash, content, content, options, path, file);
     }
 
+    /// <summary>
+    /// Three-way decision with baseline B (last applied template), local L, new template N and pending P (an
+    /// unresolved incoming version). Local changes always win unless --force is given; a conflict keeps B and
+    /// records N as pending, so it stays visible until resolved.
+    /// </summary>
     private static PlanAction ThreeWay(Func<PlanActionKind, string, string?, ManifestFile?, string?, PlanAction> make,
         string currentHash, ManifestFile old, string newHash, string newFileContent, string incoming, PlanOptions options, string path, RenderedFile file)
     {
-        if (currentHash == old.Hash)
+        var pending = old.PendingHash is not null;
+        if (currentHash == newHash)
         {
-            return newHash == old.Hash
+            return currentHash == old.Hash && !pending
                 ? make(PlanActionKind.Unchanged, "up to date", null, old, null)
-                : make(PlanActionKind.Update, "unmodified locally; updating to the new template", newFileContent, Entry(path, file, newHash), null);
+                : make(PlanActionKind.Adopt, pending ? "local content now matches the incoming template; conflict resolved" : "local content already matches the new template",
+                    null, Entry(path, file, newHash, old.JsonKeys), null);
         }
 
-        if (currentHash == newHash)
-            return make(PlanActionKind.Adopt, "local content already matches the new template", null, Entry(path, file, newHash), null);
+        if (currentHash == old.Hash)
+            return make(PlanActionKind.Update, pending ? "local edits were reverted; updating to the new template and clearing the conflict" : "unmodified locally; updating to the new template",
+                newFileContent, Entry(path, file, newHash, old.JsonKeys), null);
         if (newHash == old.Hash)
-            return make(PlanActionKind.KeepLocal, "modified locally; template unchanged, keeping local version", null, old, null);
+            return make(PlanActionKind.KeepLocal, pending ? "template reverted to the applied version; conflict cleared, keeping local version" : "modified locally; template unchanged, keeping local version",
+                null, WithPending(old, null), null);
         if (options.Force)
-            return make(PlanActionKind.Overwrite, "modified locally; replaced because --force was given (backup kept)", newFileContent, Entry(path, file, newHash), null);
+            return make(PlanActionKind.Overwrite, "modified locally; replaced because --force was given (backup kept)", newFileContent, Entry(path, file, newHash, old.JsonKeys), null);
 
-        // Local wins. The new template is saved for manual merge and becomes the recorded baseline, so the same
-        // conflict is not reported again on every update.
-        return make(PlanActionKind.Conflict, $"modified locally and changed upstream; kept local version, new version saved to {ConflictsFolder}/{path}",
-            null, Entry(path, file, newHash), incoming);
+        var reason = old.PendingHash == newHash
+            ? $"unresolved conflict: local version kept; merge {ConflictsFolder}/{path}.incoming, then run 'agent-standards resolve {path}'"
+            : $"modified locally and changed upstream: local version kept, incoming saved to {ConflictsFolder}/{path}.incoming; merge it, then run 'agent-standards resolve {path}'";
+        return make(PlanActionKind.Conflict, reason, null, WithPending(old, newHash), incoming);
     }
+
+    private static ManifestFile WithPending(ManifestFile f, string? pending) => new()
+    {
+        Path = f.Path, Mode = f.Mode, Hash = f.Hash, Source = f.Source, JsonKeys = f.JsonKeys, PendingHash = pending
+    };
+
+    public static (string Incoming, string Base) ConflictCopyPaths(string path) =>
+        ($"{ConflictsFolder}/{path}.incoming", $"{ConflictsFolder}/{path}.base");
+
+    /// <summary>
+    /// Translates plan actions into concrete file changes: managed files, conflict copies (written for conflicts,
+    /// removed once a path is no longer in conflict). Changes that would not alter a file are dropped.
+    /// </summary>
+    public static List<FileChange> BuildFileChanges(string root, IReadOnlyList<PlanAction> actions)
+    {
+        var changes = new List<FileChange>();
+        void Add(string path, string? after)
+        {
+            var current = AtomicFile.ReadTextOrNull(root, path);
+            if (current == after)
+                return;
+            changes.Add(new FileChange(path, after, current is null ? Transaction.Absent : ContentHash.Compute(current)));
+        }
+
+        foreach (var action in actions)
+        {
+            if (action.Writes)
+                changes.Add(new FileChange(action.Path, action.After, Expected(action.Before)));
+            else if (action.Deletes)
+                changes.Add(new FileChange(action.Path, null, Expected(action.Before)));
+
+            var (incomingPath, basePath) = ConflictCopyPaths(action.Path);
+            if (action.Kind == PlanActionKind.Conflict)
+            {
+                Add(incomingPath, action.Incoming);
+                // The baseline can only be rebuilt on the first report (the manifest then moves to the new template
+                // version), so an existing .base copy is kept while the conflict stays pending.
+                if (action.BaseContent is not null)
+                    Add(basePath, action.BaseContent);
+            }
+            else
+            {
+                Add(incomingPath, null);
+                Add(basePath, null);
+            }
+        }
+        return changes;
+    }
+
+    private static string Expected(string? before) => before is null ? Transaction.Absent : ContentHash.Compute(before);
 
     private static PlanAction PlanBlock(string path, RenderedFile file, string? current, ManifestFile? old, PlanOptions options)
     {
@@ -182,18 +241,24 @@ public static class InstallPlanner
         }
 
         var added = new List<string>();
+        var kept = new List<string>();
         foreach (var (name, server) in desired)
         {
             if (servers.ContainsKey(name))
+            {
+                if (!JsonNode.DeepEquals(servers[name], server))
+                    kept.Add(name);
                 continue;
+            }
             servers[name] = server!.DeepClone();
             added.Add(name);
         }
 
         var keys = (old?.JsonKeys ?? []).Concat(added).Distinct(StringComparer.Ordinal).ToList();
+        var keptNote = kept.Count == 0 ? "" : $"; kept your existing definition of {string.Join(", ", kept)} (differs from the template)";
         return added.Count == 0
-            ? Make(PlanActionKind.Unchanged, "all MCP servers already present (existing entries are never modified)", entry: Entry(path, file, hash, keys))
-            : Make(PlanActionKind.Merge, $"adding MCP servers: {string.Join(", ", added)} (existing entries untouched)", root.ToJsonString(writeOptions) + "\n",
+            ? Make(PlanActionKind.Unchanged, "all MCP servers already present (existing entries are never modified)" + keptNote, entry: Entry(path, file, hash, keys))
+            : Make(PlanActionKind.Merge, $"adding MCP servers: {string.Join(", ", added)} (existing entries untouched){keptNote}", root.ToJsonString(writeOptions) + "\n",
                 Entry(path, file, hash, keys));
     }
 

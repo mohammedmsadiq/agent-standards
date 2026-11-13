@@ -3,14 +3,19 @@ using AgentStandards.Core.Templates;
 
 namespace AgentStandards.Core.Profiles;
 
-public sealed record DetectionResult(IReadOnlyList<string> Profiles, IReadOnlyDictionary<string, IReadOnlyList<string>> Evidence, bool FellBackToGeneric);
+/// <param name="Truncated">True when the scan stopped at the file limit, so detection may be incomplete.</param>
+public sealed record DetectionResult(IReadOnlyList<string> Profiles, IReadOnlyDictionary<string, IReadOnlyList<string>> Evidence, bool FellBackToGeneric,
+    int FilesScanned = 0, bool Truncated = false)
+{
+    public string Limits => $"scans up to {ProjectDetector.MaxDepth} directory levels and {ProjectDetector.MaxFiles} files; skips build output, dependency and VCS folders; never follows symbolic links";
+}
 
 /// <summary>Detects project profiles from real repository files using each profile's declarative <c>detect</c> rules.</summary>
 public static class ProjectDetector
 {
     public const string FallbackProfile = "generic";
-    private const int MaxDepth = 6;
-    private const int MaxFiles = 20000;
+    public const int MaxDepth = 6;
+    public const int MaxFiles = 20000;
     private const int MaxContentReadsPerCondition = 300;
     private const long MaxContentBytes = 512 * 1024;
 
@@ -72,9 +77,10 @@ public static class ProjectDetector
 
         // Keep the most specific profiles: drop any matched profile that another matched profile extends.
         var specific = matched.Where(m => !matched.Any(other => other != m && ProfileResolver.Extends(templates, other, m))).ToList();
+        var truncated = files.Count >= MaxFiles;
         if (specific.Count == 0)
-            return new DetectionResult([FallbackProfile], evidence, true);
-        return new DetectionResult(specific, evidence, false);
+            return new DetectionResult([FallbackProfile], evidence, true, files.Count, truncated);
+        return new DetectionResult(specific, evidence, false, files.Count, truncated);
     }
 
     private static string? FindMatch(string root, IReadOnlyList<string> files, DetectCondition condition, Dictionary<string, string?> cache)

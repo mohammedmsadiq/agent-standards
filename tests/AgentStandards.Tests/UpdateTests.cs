@@ -38,17 +38,24 @@ public class UpdateTests
         var security = h.Repo.Read(".agent-standards/standards/security.md");
         Assert.Contains("(team edit)", security);
         Assert.DoesNotContain("(v2)", security);
-        Assert.Contains("# Security (v2)", h.Repo.Read(".agent-standards/conflicts/.agent-standards/standards/security.md"));
+        Assert.Contains("# Security (v2)", h.Repo.Read(".agent-standards/conflicts/.agent-standards/standards/security.md.incoming"));
+        Assert.DoesNotContain("(v2)", h.Repo.Read(".agent-standards/conflicts/.agent-standards/standards/security.md.base")); // previously applied version
         var agents = h.Repo.Read("AGENTS.md");
         Assert.Contains("## Core engineering rules (v2)", agents);
         Assert.Contains("Team notes outside the block.", agents);
         Assert.True(h.Repo.Exists(".claude/skills/our-skill/SKILL.md"));
         Assert.Equal("2.0.0", ManifestStore.Load(h.Repo.Path)!.Templates.Version);
 
-        // The conflict is reported once; the next update keeps the local version quietly.
+        // The conflict stays visible on later updates until it is resolved.
         var again = await h.Run("update", "--templates", v2.Path);
-        Assert.Equal(0, again.Code);
+        Assert.True(again.Code == 2, again.ToString());
         Assert.Contains("(team edit)", h.Repo.Read(".agent-standards/standards/security.md"));
+        Assert.Contains(StatusService.Get(h.Repo.Path, "x").Files, f => f.Path.EndsWith("security.md") && f.State == FileState.Conflict);
+
+        var resolve = await h.Run("resolve", ".agent-standards/standards/security.md");
+        Assert.True(resolve.Code == 0, resolve.ToString());
+        Assert.False(h.Repo.Exists(".agent-standards/conflicts/.agent-standards/standards/security.md.incoming"));
+        Assert.Equal(0, (await h.Run("update", "--templates", v2.Path)).Code);
         Assert.Contains(StatusService.Get(h.Repo.Path, "x").Files, f => f.Path.EndsWith("security.md") && f.State == FileState.Modified);
     }
 
@@ -70,7 +77,7 @@ public class UpdateTests
         Assert.Equal(2, result.Code);
         Assert.Contains(result.Json["actions"]!.AsArray(), a => a!["path"]!.GetValue<string>() == "CLAUDE.md" && a["action"]!.GetValue<string>() == "conflict");
         Assert.Contains("(edited inside block)", h.Repo.Read("CLAUDE.md"));
-        Assert.Contains("## Claude Code v2", h.Repo.Read(".agent-standards/conflicts/CLAUDE.md"));
+        Assert.Contains("## Claude Code v2", h.Repo.Read(".agent-standards/conflicts/CLAUDE.md.incoming"));
     }
 
     [Fact]
@@ -166,13 +173,17 @@ public class UpdateTests
     {
         using var h = new Harness();
         await h.Run("init", "--profile", "generic");
-        h.Repo.Write("AGENTS.md", h.Repo.Read("AGENTS.md") + "\nlater edit\n");
+        h.Repo.Write("AGENTS.md", h.Repo.Read("AGENTS.md").Replace("# AI engineering standards", "# AI engineering standards\nlater edit"));
 
         var result = await h.Run("rollback", "--yes");
 
-        Assert.Equal(0, result.Code);
-        Assert.Contains("skipmodified", result.Out);
+        Assert.Equal(2, result.Code); // partial
+        Assert.Contains("skip-modified", result.Out);
         Assert.Contains("later edit", h.Repo.Read("AGENTS.md"));
+        // The kept file stays tracked, so its local edit is still recognised.
+        var manifest = ManifestStore.Load(h.Repo.Path)!;
+        Assert.Equal(["AGENTS.md"], manifest.Files.Select(f => f.Path));
+        Assert.Equal(FileState.Modified, StatusService.GetState(h.Repo.Path, manifest.Files[0]));
     }
 
     [Fact]

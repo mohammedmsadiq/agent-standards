@@ -113,6 +113,23 @@ public sealed class Frontmatter
             ? value[1..^1]
             : value;
 
-    /// <summary>Quotes a scalar for YAML output when needed.</summary>
-    public static string Quote(string value) => "\"" + value.Replace("\\", "\\\\", StringComparison.Ordinal).Replace("\"", "\\\"", StringComparison.Ordinal) + "\"";
+    /// <summary>Quotes a scalar as a YAML double-quoted string, escaping backslashes, quotes and control characters.</summary>
+    public static string Quote(string value)
+    {
+        var sb = new System.Text.StringBuilder("\"");
+        foreach (var c in value)
+        {
+            sb.Append(c switch
+            {
+                '\\' => "\\\\",
+                '"' => "\\\"",
+                '\n' => "\\n",
+                '\r' => "\\r",
+                '\t' => "\\t",
+                _ when char.IsControl(c) => $"\\u{(int)c:X4}",
+                _ => c.ToString()
+            });
+        }
+        return sb.Append('"').ToString();
+    }
 }

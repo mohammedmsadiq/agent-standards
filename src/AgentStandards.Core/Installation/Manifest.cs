@@ -47,6 +47,11 @@ public sealed class ManifestFile
     public string Source { get; set; } = "";
     /// <summary>JsonMerge only: server names this toolkit added.</summary>
     public List<string>? JsonKeys { get; set; }
+    /// <summary>
+    /// Set while a conflict is unresolved: the hash of the incoming template content. <see cref="Hash"/> keeps the
+    /// last applied baseline until the conflict is resolved.
+    /// </summary>
+    public string? PendingHash { get; set; }
 }
 
 public sealed class ManifestException(string message, Exception? inner = null) : Exception(message, inner);
@@ -82,12 +87,19 @@ public static class ManifestStore
 
         if (manifest is null)
             throw new ManifestException($"{Manifest.RelativePath} is empty.");
+        if (manifest.Files is null || manifest.Templates is null || manifest.Profiles is null || manifest.Assistants is null || manifest.Exclude is null)
+            throw new ManifestException($"{Manifest.RelativePath} is incomplete (missing files, templates, profiles, assistants or exclude). Restore it from version control or re-run 'agent-standards init --force'.");
+        manifest.ResolvedProfiles ??= [];
         if (manifest.SchemaVersion > Manifest.CurrentSchemaVersion)
             throw new ManifestException($"{Manifest.RelativePath} uses schema {manifest.SchemaVersion}; this tool supports {Manifest.CurrentSchemaVersion}. Update the agent-standards tool.");
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var file in manifest.Files)
         {
+            if (file is null)
+                throw new ManifestException($"{Manifest.RelativePath} contains an empty file entry.");
+            if (!Enum.IsDefined(file.Mode))
+                throw new ManifestException($"{Manifest.RelativePath} entry '{file.Path}' has an unknown mode.");
             if (!SafePaths.TryNormalizeRelative(file.Path, out var normalized))
                 throw new ManifestException($"{Manifest.RelativePath} contains an unsafe path '{file.Path}'.");
             if (string.IsNullOrEmpty(file.Hash))

@@ -59,6 +59,14 @@ public static class Doctor
 
         checks.Add(new("Template cache", CheckStatus.Info, env.PackageCacheDirectory));
 
+        // Documented overrides that agent-standards deliberately does not follow (see docs/assistants.md).
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR")))
+            checks.Add(new("CLAUDE_CONFIG_DIR", CheckStatus.Warning,
+                "is set. Claude Code documents it for settings, history and plugins, not for CLAUDE.md, rules, skills or agents; global installs still target ~/.claude. Verify with /context in Claude Code."));
+        if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("COPILOT_HOME")))
+            checks.Add(new("COPILOT_HOME", CheckStatus.Warning,
+                "is set. It relocates Copilot CLI's configuration folder, but VS Code reads personal instructions, skills and agents from ~/.copilot; global installs still target ~/.copilot."));
+
         if (!Directory.Exists(root))
         {
             checks.Add(new("Target", CheckStatus.Error, $"{root} does not exist"));
@@ -75,6 +83,24 @@ public static class Doctor
         {
             checks.Add(new("State folder", CheckStatus.Error, $"{RenderContext.StateFolder} is a symbolic link; the toolkit refuses to write through it"));
             return checks;
+        }
+
+        if (OperationJournal.Read(root) is { } journal)
+            checks.Add(new("Interrupted operation", CheckStatus.Error,
+                $"'{journal.Operation}' (backup {journal.BackupId}) did not finish. Run 'agent-standards rollback' to restore the previous state."));
+
+        if (scope == InstallScope.Project)
+        {
+            try
+            {
+                var detection = Profiles.ProjectDetector.Detect(root, resolver.LoadBundled());
+                checks.Add(new("Detection", detection.Truncated ? CheckStatus.Warning : CheckStatus.Info,
+                    $"{string.Join(", ", detection.Profiles)}{(detection.FellBackToGeneric ? " (no framework detected)" : "")}; {detection.FilesScanned} files scanned{(detection.Truncated ? " — file limit reached, results may be incomplete; use --profile" : "")}. Detection {detection.Limits}."));
+            }
+            catch (TemplateException)
+            {
+                // Already reported under "Bundled templates".
+            }
         }
 
         Manifest? manifest = null;
@@ -103,9 +129,10 @@ public static class Doctor
             checks.Add(new("Managed files", malformed > 0 ? CheckStatus.Error : modified + missing > 0 ? CheckStatus.Info : CheckStatus.Ok,
                 $"{manifest.Files.Count} tracked, {modified} modified locally, {missing} missing, {malformed} malformed or unsafe"));
 
-            var conflicts = StatusService.PendingConflicts(root);
-            if (conflicts.Count > 0)
-                checks.Add(new("Pending conflicts", CheckStatus.Warning, $"{conflicts.Count} file(s) under {InstallPlanner.ConflictsFolder}/ await manual merge"));
+            var pending = ConflictService.Pending(manifest);
+            if (pending.Count > 0)
+                checks.Add(new("Unresolved conflicts", CheckStatus.Warning,
+                    $"{string.Join(", ", pending.Select(p => p.Path))}: merge the copies under {InstallPlanner.ConflictsFolder}/, then run 'agent-standards resolve <path>'"));
 
             if (NuGet.Versioning.NuGetVersion.TryParse(resolver.BundledVersion, out var bundledVersion) &&
                 NuGet.Versioning.NuGetVersion.TryParse(manifest.Templates.Version, out var installed) && bundledVersion > installed && !manifest.Templates.Pinned)

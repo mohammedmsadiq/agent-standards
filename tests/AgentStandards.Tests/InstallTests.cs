@@ -120,7 +120,7 @@ public class InstallTests
         Assert.Contains("\r\n", h.Repo.Read("CLAUDE.md")); // line endings of the user's file kept
         Assert.Equal(reviewer, h.Repo.Read(".claude/agents/code-reviewer.md"));
         Assert.Equal("readme", h.Repo.Read("README.md"));
-        Assert.True(h.Repo.Exists(".agent-standards/conflicts/.claude/agents/code-reviewer.md"));
+        Assert.True(h.Repo.Exists(".agent-standards/conflicts/.claude/agents/code-reviewer.md.incoming"));
         Assert.DoesNotContain(ManifestStore.Load(h.Repo.Path)!.Files, f => f.Path == ".claude/agents/code-reviewer.md");
 
         // --force replaces it, keeping a backup.

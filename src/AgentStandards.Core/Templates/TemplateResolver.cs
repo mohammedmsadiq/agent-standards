@@ -194,12 +194,18 @@ public sealed class TemplateResolver(ToolEnvironment environment)
 
     private TemplateSet FromPackage(Stream stream, string id, NuGetVersion version, string source)
     {
-        using (var reader = new PackageArchiveReader(stream, leaveStreamOpen: true))
+        NuGet.Packaging.Core.PackageIdentity identity;
+        try
         {
-            var identity = reader.GetIdentity();
-            if (!string.Equals(identity.Id, id, StringComparison.OrdinalIgnoreCase) || identity.Version != version)
-                throw new TemplateException($"Package at {source} identifies as {identity.Id} {identity.Version}, expected {id} {version}.");
+            using var reader = new PackageArchiveReader(stream, leaveStreamOpen: true);
+            identity = reader.GetIdentity();
         }
+        catch (Exception ex) when (ex is not TemplateException and not OperationCanceledException)
+        {
+            throw new TemplateException($"Package at {source} is not a valid NuGet package: {ex.Message}", ex);
+        }
+        if (!string.Equals(identity.Id, id, StringComparison.OrdinalIgnoreCase) || identity.Version != version)
+            throw new TemplateException($"Package at {source} identifies as {identity.Id} {identity.Version}, expected {id} {version}.");
 
         stream.Position = 0;
         var files = TemplateLoader.ReadPackage(stream);

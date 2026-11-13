@@ -12,7 +12,9 @@ public enum FileState
     Modified,
     Missing,
     BlockMissing,
-    Malformed
+    Malformed,
+    /// <summary>Unresolved conflict: local version kept, incoming version awaiting manual merge.</summary>
+    Conflict
 }
 
 public sealed record FileStatus(string Path, ManagedMode Mode, FileState State, string Source);
@@ -24,7 +26,9 @@ public sealed record StatusReport(
     IReadOnlyList<string> PendingConflicts,
     string BundledVersion,
     bool NewerBundledTemplates,
-    IReadOnlyList<BackupRecord> Backups);
+    IReadOnlyList<BackupRecord> Backups,
+    OperationJournal? InterruptedOperation,
+    IReadOnlyList<string> UnmanagedFiles);
 
 public static class StatusService
 {
@@ -37,14 +41,17 @@ public static class StatusService
             ? NuGetVersion.TryParse(bundledVersion, out var b) && NuGetVersion.TryParse(manifest.Templates.Version, out var i) && b > i && !manifest.Templates.Pinned
             : false;
 
-        return new StatusReport(root, manifest, files, PendingConflicts(root), bundledVersion, newer, BackupStore.List(root));
+        return new StatusReport(root, manifest, files, PendingConflicts(root), bundledVersion, newer, BackupStore.List(root),
+            OperationJournal.Read(root), UnmanagedFiles(root, manifest));
     }
 
-    public static FileState GetState(string root, ManifestFile file)
+    public static FileState GetState(string root, ManifestFile file, bool ignorePending = false)
     {
         var current = AtomicFile.ReadTextOrNull(root, file.Path);
         if (current is null)
             return FileState.Missing;
+        if (file.PendingHash is not null && !ignorePending)
+            return FileState.Conflict;
 
         switch (file.Mode)
         {
@@ -69,6 +76,33 @@ public static class StatusService
                     return FileState.Malformed;
                 }
         }
+    }
+
+    private static readonly string[] AssistantFiles = ["AGENTS.md", "CLAUDE.md", ".mcp.json", ".github/copilot-instructions.md", ".claude/CLAUDE.md", ".copilot/copilot-instructions.md"];
+    private static readonly string[] AssistantFolders = [".claude/rules", ".claude/skills", ".claude/agents", ".github/instructions", ".github/skills", ".github/agents",
+        ".copilot/instructions", ".copilot/skills", ".copilot/agents"];
+
+    /// <summary>Assistant configuration files present under the root that agent-standards does not manage.</summary>
+    public static IReadOnlyList<string> UnmanagedFiles(string root, Manifest manifest)
+    {
+        var managed = manifest.Files.Select(f => f.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>();
+        foreach (var file in AssistantFiles)
+            if (!managed.Contains(file) && File.Exists(SafePaths.Resolve(root, file)))
+                result.Add(file);
+        foreach (var folder in AssistantFolders)
+        {
+            var dir = SafePaths.Resolve(root, folder);
+            if (!Directory.Exists(dir) || SafePaths.IsLink(dir))
+                continue;
+            foreach (var path in Directory.EnumerateFiles(dir, "*", new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint }))
+            {
+                var rel = folder + "/" + Path.GetRelativePath(dir, path).Replace(Path.DirectorySeparatorChar, '/');
+                if (!managed.Contains(rel))
+                    result.Add(rel);
+            }
+        }
+        return result.Order(StringComparer.Ordinal).ToList();
     }
 
     public static IReadOnlyList<string> PendingConflicts(string root)

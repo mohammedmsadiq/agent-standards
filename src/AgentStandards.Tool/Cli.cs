@@ -66,6 +66,7 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
         root.Subcommands.Add(BuildListCommand());
         root.Subcommands.Add(BuildDoctorCommand());
         root.Subcommands.Add(BuildRollbackCommand());
+        root.Subcommands.Add(BuildResolveCommand());
 
         var parse = root.Parse(args);
         return await parse.InvokeAsync(new InvocationConfiguration { Output = stdout, Error = stderr }, cancellationToken);
@@ -93,6 +94,8 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
                     WriteJson(PlanJson(prepared, null, request.DryRun));
                 else
                     stdout.WriteLine(request.DryRun ? "Dry run: no files were changed." : "Nothing to do; already up to date.");
+                if (!json && prepared.Plan.HasConflicts)
+                    stdout.WriteLine(ConflictHint(prepared.Plan));
                 return prepared.Plan.HasConflicts ? ExitConflicts : ExitOk;
             }
 
@@ -112,8 +115,8 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
                 stdout.WriteLine($"Done: {execution.Written.Count} written, {execution.Deleted.Count} deleted.");
                 if (execution.BackupId is not null)
                     stdout.WriteLine($"Backup {execution.BackupId} saved; undo with 'agent-standards rollback'.");
-                if (execution.ConflictCopies.Count > 0)
-                    stdout.WriteLine($"{execution.ConflictCopies.Count} conflict(s): local versions kept, incoming versions saved under {InstallPlanner.ConflictsFolder}/ for manual merge.");
+                if (prepared.Plan.HasConflicts)
+                    stdout.WriteLine(ConflictHint(prepared.Plan));
             }
             return prepared.Plan.HasConflicts ? ExitConflicts : ExitOk;
         }));
@@ -183,10 +186,13 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
                     exclude = m.Exclude,
                     mcp = m.Mcp,
                     files = report.Files,
-                    pendingConflicts = report.PendingConflicts,
+                    conflictCopies = report.PendingConflicts,
+                    unresolvedConflicts = report.Files.Where(f => f.State == FileState.Conflict).Select(f => f.Path),
+                    interruptedOperation = report.InterruptedOperation,
+                    unmanagedFiles = report.UnmanagedFiles,
                     backups = report.Backups.Select(b => new { b.Id, b.Operation, b.CreatedAt, b.TemplatesVersionBefore, b.TemplatesVersionAfter })
                 });
-                return Task.FromResult(ExitOk);
+                return Task.FromResult(report.InterruptedOperation is null ? ExitOk : ExitError);
             }
 
             stdout.WriteLine($"Root:       {report.Root} ({m.Scope.ToString().ToLowerInvariant()} scope)");
@@ -200,12 +206,22 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
             stdout.WriteLine($"Files:      {report.Files.Count} managed — {string.Join(", ", groups.Select(g => $"{g.Value} {StateLabel(g.Key)}"))}");
             foreach (var file in report.Files.Where(f => f.State != FileState.Unmodified || parse.GetValue(_verbose)))
                 stdout.WriteLine($"  {StateLabel(file.State),-14} {file.Path}");
-            foreach (var conflict in report.PendingConflicts)
+            foreach (var conflict in report.PendingConflicts.Where(c => parse.GetValue(_verbose)))
                 stdout.WriteLine($"  {"conflict copy",-14} {conflict}");
+            if (report.Files.Any(f => f.State == FileState.Conflict))
+                stdout.WriteLine($"Conflicts:  merge the copies under {InstallPlanner.ConflictsFolder}/, then run 'agent-standards resolve <path>' (or --all).");
+            if (report.UnmanagedFiles.Count > 0)
+            {
+                stdout.WriteLine($"Unmanaged:  {report.UnmanagedFiles.Count} assistant configuration file(s) not managed by agent-standards{(parse.GetValue(_verbose) ? ":" : " (--verbose to list)")}");
+                foreach (var file in report.UnmanagedFiles.Where(_ => parse.GetValue(_verbose)))
+                    stdout.WriteLine($"  {"unmanaged",-14} {file}");
+            }
+            if (report.InterruptedOperation is { } interrupted)
+                stdout.WriteLine($"INTERRUPTED: '{interrupted.Operation}' (backup {interrupted.BackupId}) did not finish. Run 'agent-standards rollback' to restore the previous state.");
             if (report.NewerBundledTemplates)
                 stdout.WriteLine($"Update available: templates {report.BundledVersion} (run 'agent-standards update --dry-run').");
             stdout.WriteLine(report.Backups.Count > 0 ? $"Backups:    {report.Backups.Count} (latest {report.Backups[0].Id})" : "Backups:    none");
-            return Task.FromResult(ExitOk);
+            return Task.FromResult(report.InterruptedOperation is null ? ExitOk : ExitError);
         }));
         return command;
     }
@@ -392,16 +408,20 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
             var preview = RollbackService.Rollback(root, parse.GetValue(to), dryRun: true, force: parse.GetValue(_force));
             if (!json)
             {
-                stdout.WriteLine($"Rolling back {preview.Backup.Operation} {preview.Backup.Id} (templates {preview.Backup.TemplatesVersionAfter} → {preview.Backup.TemplatesVersionBefore ?? "not installed"}):");
+                stdout.WriteLine(preview.RecoversInterruptedOperation
+                    ? $"Recovering interrupted {preview.Backup.Operation} {preview.Backup.Id}:"
+                    : $"Rolling back {preview.Backup.Operation} {preview.Backup.Id} (templates {preview.Backup.TemplatesVersionAfter} → {preview.Backup.TemplatesVersionBefore ?? "not installed"}):");
                 foreach (var action in preview.Actions)
-                    stdout.WriteLine($"  {action.Kind.ToString().ToLowerInvariant(),-16} {action.Path} — {action.Reason}");
+                    stdout.WriteLine($"  {RollbackLabel(action.Kind),-16} {action.Path} — {action.Reason}");
+                if (preview.Partial)
+                    stdout.WriteLine("Partial rollback: files changed after the operation are kept (see skip-modified); use --force to revert them too.");
             }
 
             if (parse.GetValue(_dryRun))
             {
-                if (json) WriteJson(preview);
+                if (json) WriteJson(RollbackJson(preview));
                 else stdout.WriteLine("Dry run: no files were changed.");
-                return Task.FromResult(ExitOk);
+                return Task.FromResult(preview.Partial ? ExitConflicts : ExitOk);
             }
 
             if (!parse.GetValue(_yes))
@@ -416,12 +436,59 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
             }
 
             var result = RollbackService.Rollback(root, preview.Backup.Id, dryRun: false, force: parse.GetValue(_force));
-            if (json) WriteJson(result);
-            else stdout.WriteLine("Rollback complete.");
+            if (json) WriteJson(RollbackJson(result));
+            else stdout.WriteLine(result.Partial ? "Rollback complete (partial: some files were kept)." : "Rollback complete.");
+            return Task.FromResult(result.Partial ? ExitConflicts : ExitOk);
+        }));
+        return command;
+    }
+
+    private Command BuildResolveCommand()
+    {
+        var command = new Command("resolve", "Mark conflicts as resolved: accept the current local file as the merge result and remove the conflict copies.");
+        var paths = new Argument<string[]>("paths") { Description = "Managed file path(s) with a pending conflict.", Arity = ArgumentArity.ZeroOrMore };
+        var all = new Option<bool>("--all") { Description = "Resolve every pending conflict." };
+        command.Arguments.Add(paths);
+        command.Options.Add(all);
+        command.Options.Add(_dryRun);
+        command.SetAction((parse, _) => Guard(parse, () =>
+        {
+            var result = ConflictService.Resolve(Root(parse), parse.GetValue(paths) ?? [], parse.GetValue(all), parse.GetValue(_dryRun));
+            if (parse.GetValue(_json))
+                WriteJson(new { resolved = result.Resolved, remaining = result.RemainingConflicts, applied = result.Applied, backupId = result.BackupId });
+            else
+            {
+                foreach (var path in result.Resolved)
+                    stdout.WriteLine($"  resolved     {path}");
+                stdout.WriteLine(result.Resolved.Count == 0 ? "No pending conflicts." :
+                    result.Applied ? $"Resolved {result.Resolved.Count} conflict(s); local versions are now the baseline for future updates."
+                                   : "Dry run: no files were changed.");
+                if (result.RemainingConflicts.Count > 0)
+                    stdout.WriteLine($"Still unresolved: {string.Join(", ", result.RemainingConflicts)}");
+            }
             return Task.FromResult(ExitOk);
         }));
         return command;
     }
+
+    private static object RollbackJson(RollbackResult r) => new
+    {
+        backupId = r.Backup.Id,
+        operation = r.Backup.Operation,
+        templatesVersionBefore = r.Backup.TemplatesVersionBefore,
+        templatesVersionAfter = r.Backup.TemplatesVersionAfter,
+        applied = r.Applied,
+        partial = r.Partial,
+        recoversInterruptedOperation = r.RecoversInterruptedOperation,
+        actions = r.Actions.Select(a => new { kind = RollbackLabel(a.Kind), path = a.Path, reason = a.Reason, forced = a.Forced })
+    };
+
+    private static string RollbackLabel(RollbackActionKind kind) => kind switch
+    {
+        RollbackActionKind.AlreadyRestored => "already-restored",
+        RollbackActionKind.SkipModified => "skip-modified",
+        _ => kind.ToString().ToLowerInvariant()
+    };
 
     private InstallRequest BuildRequest(ParseResult parse, bool isUpdate, bool? dryRunOverride = null)
     {
@@ -464,16 +531,30 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
         {
             return await action();
         }
-        catch (Exception ex) when (ex is TemplateException or ManifestException or UnsafePathException or DirectoryNotFoundException
-                                       or InvalidOperationException or ArgumentException or IOException or UnauthorizedAccessException)
+        catch (OperationCanceledException)
         {
-            if (parse.GetValue(_json))
-                WriteJson(new { error = ex.Message });
-            stderr.WriteLine($"error: {ex.Message}");
-            if (parse.GetValue(_verbose))
-                stderr.WriteLine(ex);
-            return ExitError;
+            return Fail(parse, "cancelled.", null);
         }
+        catch (Exception ex) when (ex is TemplateException or ManifestException or UnsafePathException or DirectoryNotFoundException
+                                       or InvalidOperationException or ArgumentException or IOException or UnauthorizedAccessException
+                                       or OperationFailedException or InterruptedOperationException)
+        {
+            return Fail(parse, ex.Message, ex);
+        }
+        catch (Exception ex)
+        {
+            return Fail(parse, $"unexpected error ({ex.GetType().Name}): {ex.Message}. No partial changes are left behind: writes are transactional. Re-run with --verbose for details.", ex);
+        }
+    }
+
+    private int Fail(ParseResult parse, string message, Exception? ex)
+    {
+        if (parse.GetValue(_json))
+            WriteJson(new { error = message });
+        stderr.WriteLine($"error: {message}");
+        if (ex is not null && parse.GetValue(_verbose))
+            stderr.WriteLine(ex);
+        return ExitError;
     }
 
     private void WritePlan(PreparedOperation prepared, bool verbose)
@@ -487,12 +568,15 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
             : "";
         stdout.WriteLine($"Profiles:   {string.Join(", ", prepared.Profiles.Requested)} (resolved: {string.Join(", ", prepared.Profiles.Ordered.Select(p => p.Id))}){detected}");
         stdout.WriteLine($"Assistants: {string.Join(", ", plan.Manifest.Assistants)}");
+        if (prepared.Detection is { } scan && (verbose || scan.Truncated))
+            stdout.WriteLine($"Detection:  {scan.FilesScanned} files scanned{(scan.Truncated ? " — file limit reached, results may be incomplete; use --profile" : "")}. Detection {scan.Limits}.");
         foreach (var message in prepared.Messages)
             stdout.WriteLine($"note: {message}");
         stdout.WriteLine();
 
-        foreach (var action in plan.Actions.Where(a => verbose || a.Kind is not (PlanActionKind.Unchanged or PlanActionKind.Adopt)))
-            stdout.WriteLine($"  {Label(action.Kind),-12} {action.Path}{(action.Kind is PlanActionKind.Create or PlanActionKind.Update or PlanActionKind.Unchanged ? "" : " — " + action.Reason)}");
+        // JSON merges are always shown: their reason reports MCP servers that were kept as the user defined them.
+        foreach (var action in plan.Actions.Where(a => verbose || a.Mode == ManagedMode.JsonMerge || a.Kind is not (PlanActionKind.Unchanged or PlanActionKind.Adopt)))
+            stdout.WriteLine($"  {Label(action.Kind),-12} {action.Path}{(action.Kind is PlanActionKind.Create or PlanActionKind.Update || action.Reason == "up to date" ? "" : " — " + action.Reason)}");
 
         var counts = plan.Actions.GroupBy(a => a.Kind).OrderBy(g => g.Key).Select(g => $"{g.Count()} {Label(g.Key)}");
         stdout.WriteLine();
@@ -517,6 +601,19 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
         backupId = execution?.BackupId,
         conflictCopies = execution?.ConflictCopies
     };
+
+    private static string ConflictHint(InstallPlan plan)
+    {
+        var conflicts = plan.Actions.Where(a => a.Kind == PlanActionKind.Conflict).ToList();
+        var managed = conflicts.Count(a => a.Entry is not null);
+        var unmanaged = conflicts.Count - managed;
+        var parts = new List<string>();
+        if (managed > 0)
+            parts.Add($"{managed} unresolved conflict(s): local versions kept; merge the copies under {InstallPlanner.ConflictsFolder}/ (*.incoming, *.base) and run 'agent-standards resolve <path>'");
+        if (unmanaged > 0)
+            parts.Add($"{unmanaged} existing unmanaged file(s) left untouched; rename or remove them, or re-run with --force (a backup is kept)");
+        return string.Join(". ", parts) + ".";
+    }
 
     private static object TemplatesJson(TemplateSet set) => new { packageId = set.PackageId, version = set.Version, source = set.Source };
 

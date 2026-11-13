@@ -24,17 +24,19 @@ public static class ContentBuilder
                 Expand(ctx, "core/agents.md", AgentsFile), "core:agents",
                 Seed: ctx.Templates.Files.GetValueOrDefault("core/agents-seed.md"));
 
-            yield return new RenderedFile(StateGitIgnore, ManagedMode.Whole, "# Local backups and conflict copies are machine-specific.\nbackups/\nconflicts/\n", "core:gitignore");
-
-            if (ctx.IncludeMcp && ctx.Profiles.McpServers.Count > 0)
-            {
-                var servers = new JsonObject();
-                foreach (var (name, server) in ctx.Profiles.McpServers.OrderBy(s => s.Key, StringComparer.Ordinal))
-                    servers[name] = JsonNode.Parse(server.GetRawText());
-                yield return new RenderedFile(McpFile, ManagedMode.JsonMerge,
-                    servers.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), "mcp");
-            }
+            yield return new RenderedFile(StateGitIgnore, ManagedMode.Whole, "# Local backups, conflict copies and the in-progress journal are machine-specific.\nbackups/\nconflicts/\noperation.json\n", "core:gitignore");
         }
+    }
+
+    /// <summary>Claude Code project MCP file (<c>.mcp.json</c>, <c>mcpServers</c> schema). Copilot uses different files.</summary>
+    public static RenderedFile? RenderClaudeMcp(RenderContext ctx)
+    {
+        if (ctx.Scope != InstallScope.Project || !ctx.IncludeMcp || ctx.Profiles.McpServers.Count == 0)
+            return null;
+        var servers = new JsonObject();
+        foreach (var (name, server) in ctx.Profiles.McpServers.OrderBy(s => s.Key, StringComparer.Ordinal))
+            servers[name] = JsonNode.Parse(server.GetRawText());
+        return new RenderedFile(McpFile, ManagedMode.JsonMerge, servers.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), "mcp");
     }
 
     public static string Expand(RenderContext ctx, string templatePath, string outputFile, IReadOnlyDictionary<string, string>? extra = null)

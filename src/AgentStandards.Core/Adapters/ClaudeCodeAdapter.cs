@@ -14,7 +14,7 @@ public sealed class ClaudeCodeAdapter : IAssistantAdapter
 {
     public string Id => "claude";
     public string DisplayName => "Claude Code";
-    public string Summary => "CLAUDE.md (imports AGENTS.md), .claude/rules, .claude/skills, .claude/agents";
+    public string Summary => "CLAUDE.md (imports AGENTS.md), .claude/rules, .claude/skills, .claude/agents, optional .mcp.json";
 
     /// <summary>Claude Code tool names granted to read-only agents.</summary>
     public static readonly string[] ReadOnlyTools = ["Read", "Grep", "Glob"];
@@ -53,5 +53,8 @@ public sealed class ClaudeCodeAdapter : IAssistantAdapter
             sb.Append("---\n").Append(agent.Body.TrimStart('\n'));
             yield return new RenderedFile($".claude/agents/{id}.md", ManagedMode.Whole, sb.ToString(), $"agent:{id}");
         }
+
+        if (ContentBuilder.RenderClaudeMcp(ctx) is { } mcp)
+            yield return mcp;
     }
 }

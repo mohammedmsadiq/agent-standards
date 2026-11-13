@@ -13,7 +13,7 @@
       { "file": "**/*.csproj", "contains": "<UseMaui>true</UseMaui>" }
     ]
   },
-  "standards": ["blazor", "accessibility"],
+  "standards": ["blazor"],
   "rules": ["blazor-components"],
   "skills": ["review-blazor-component"],
   "agents": []

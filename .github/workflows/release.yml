@@ -1,14 +1,18 @@
 name: Release to NuGet.org
 
 # Publishing is a separate, manual, explicitly approved operation:
-#  - it only runs when someone starts it from the Actions tab;
-#  - the job uses the protected 'nuget-org' environment (configure required reviewers in repository settings);
-#  - the API key is the NUGET_API_KEY secret of that environment, never stored in the repository.
+#  - it runs only when started from the Actions tab with an existing release tag and the word "publish";
+#  - the tag must point to a commit on main, and the package version must equal the tag;
+#  - build and test run in a job without access to secrets; only the publish job uses the protected
+#    'nuget-org' environment (configure required reviewers) and its NUGET_API_KEY secret;
+#  - an already published version is never re-pushed silently: a fully published version fails the run,
+#    a partially published one pushes only the missing package, and the run fails unless both packages are
+#    visible on nuget.org afterwards.
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Exact package version being released (must match Directory.Build.props, e.g. 0.1.0-preview.1)
+      tag:
+        description: Release tag to publish (must already exist), e.g. v0.1.0-preview.1
         required: true
       confirm:
         description: Type "publish" to confirm publishing to NuGet.org
@@ -17,46 +21,139 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: nuget-release
+  cancel-in-progress: false
+
 jobs:
-  publish:
+  build:
+    name: Build and verify ${{ inputs.tag }}
     if: inputs.confirm == 'publish'
     runs-on: ubuntu-latest
-    environment: nuget-org
     defaults:
       run:
         shell: bash
+    outputs:
+      version: ${{ steps.verify.outputs.version }}
+      commit: ${{ steps.verify.outputs.commit }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          ref: refs/tags/${{ inputs.tag }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - uses: actions/setup-dotnet@v4
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
           global-json-file: global.json
 
-      - name: Build, test and pack
+      - name: Verify tag, commit and version
+        id: verify
+        env:
+          TAG: ${{ inputs.tag }}
         run: |
+          set -euo pipefail
+          commit="$(git rev-parse "refs/tags/$TAG^{commit}")"
+          test "$commit" = "$(git rev-parse HEAD)" || { echo "::error::checked-out commit does not match tag $TAG"; exit 1; }
+          git fetch --no-tags origin main
+          git merge-base --is-ancestor "$commit" origin/main || { echo "::error::tag $TAG ($commit) is not on main"; exit 1; }
+          version="$(dotnet msbuild src/AgentStandards.Tool/AgentStandards.Tool.csproj -getProperty:PackageVersion)"
+          test "v$version" = "$TAG" || { echo "::error::package version $version does not match tag $TAG"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+
+      - name: Build, validate, pack, test and end-to-end check
+        run: |
+          set -euo pipefail
           dotnet build AgentStandards.slnx -c Release
           dotnet run --project src/AgentStandards.Tool -c Release --no-build -- validate --templates templates/AgentStandards.Templates/agent-standards
           dotnet pack AgentStandards.slnx -c Release --no-build -o artifacts/packages
           AGENT_STANDARDS_PACKAGES="$PWD/artifacts/packages" dotnet test AgentStandards.slnx -c Release --no-build
           scripts/e2e.sh
 
-      - name: Check version
-        run: |
-          test -f "artifacts/packages/AgentStandards.Tool.${{ inputs.version }}.nupkg"
-          test -f "artifacts/packages/AgentStandards.Templates.${{ inputs.version }}.nupkg"
-
-      - name: Push to NuGet.org
+      - name: Check package set and write checksums
         env:
+          VERSION: ${{ steps.verify.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd artifacts/packages
+          test -f "AgentStandards.Tool.$VERSION.nupkg"
+          test -f "AgentStandards.Templates.$VERSION.nupkg"
+          test "$(ls *.nupkg | wc -l)" -eq 2 || { echo "::error::unexpected packages"; ls; exit 1; }
+          sha256sum *.nupkg *.snupkg > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-packages
+          path: artifacts/packages/
+          if-no-files-found: error
+
+  publish:
+    name: Publish ${{ needs.build.outputs.version }} to NuGet.org
+    needs: build
+    runs-on: ubuntu-latest
+    environment: nuget-org
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-packages
+          path: packages
+
+      - name: Verify artifact checksums
+        working-directory: packages
+        run: sha256sum -c SHA256SUMS
+
+      - name: Push missing packages (templates first)
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
           NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          test -n "$NUGET_API_KEY" || { echo "NUGET_API_KEY is not configured for the nuget-org environment" >&2; exit 1; }
-          # Templates first, so the tool never references a templates version that is not yet available.
-          dotnet nuget push "artifacts/packages/AgentStandards.Templates.${{ inputs.version }}.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
-          dotnet nuget push "artifacts/packages/AgentStandards.Tool.${{ inputs.version }}.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
+          set -euo pipefail
+          test -n "$NUGET_API_KEY" || { echo "::error::NUGET_API_KEY is not configured for the nuget-org environment"; exit 1; }
+          lower_version="$(echo "$VERSION" | tr '[:upper:]' '[:lower:]')"
+          exists() {
+            local id="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+            local code
+            code="$(curl -s -o /dev/null -w '%{http_code}' "https://api.nuget.org/v3-flatcontainer/$id/$lower_version/$id.$lower_version.nupkg")"
+            case "$code" in 200) return 0 ;; 404) return 1 ;; *) echo "::error::unexpected HTTP $code checking $1"; exit 1 ;; esac
+          }
+          missing=()
+          for id in AgentStandards.Templates AgentStandards.Tool; do
+            if exists "$id"; then echo "$id $VERSION is already on nuget.org"; else missing+=("$id"); fi
+          done
+          if [ "${#missing[@]}" -eq 0 ]; then
+            echo "::error::both packages for $VERSION are already published; bump the version for a new release"
+            exit 1
+          fi
+          if [ "${#missing[@]}" -eq 1 ]; then
+            echo "::warning::completing a partial publication: only ${missing[0]} $VERSION is missing"
+          fi
+          for id in "${missing[@]}"; do
+            # No --skip-duplicate: a concurrent duplicate must fail loudly.
+            dotnet nuget push "packages/$id.$VERSION.nupkg" --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
+          done
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: released-packages
-          path: artifacts/packages/
+      - name: Verify both packages are available
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+          COMMIT: ${{ needs.build.outputs.commit }}
+        run: |
+          set -euo pipefail
+          lower_version="$(echo "$VERSION" | tr '[:upper:]' '[:lower:]')"
+          for id in agentstandards.templates agentstandards.tool; do
+            for attempt in $(seq 1 40); do
+              code="$(curl -s -o /dev/null -w '%{http_code}' "https://api.nuget.org/v3-flatcontainer/$id/$lower_version/$id.$lower_version.nupkg")"
+              [ "$code" = 200 ] && { echo "$id $VERSION is available"; break; }
+              [ "$attempt" = 40 ] && { echo "::error::$id $VERSION is not available after 20 minutes; check nuget.org validation"; exit 1; }
+              sleep 30
+            done
+          done
+          {
+            echo "### Published $VERSION"
+            echo "- Commit: $COMMIT"
+            echo "- AgentStandards.Templates and AgentStandards.Tool are available on nuget.org"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -62,6 +62,12 @@ public sealed class StandardsEngine(ToolEnvironment environment)
             throw new DirectoryNotFoundException($"Directory '{root}' does not exist.");
         if (SafePaths.IsLink(Path.Combine(root, RenderContext.StateFolder)))
             throw new UnsafePathException(RenderContext.StateFolder, "the state folder is a symbolic link");
+        if (request.Scope == InstallScope.Project)
+            EnsureNotGlobalConfiguration(root);
+        if (OperationJournal.Read(root) is { } journal)
+            throw new InterruptedOperationException(
+                $"An interrupted '{journal.Operation}' operation (backup {journal.BackupId}) was found in '{root}'. " +
+                "Run 'agent-standards rollback' to restore the state before it, then retry.");
 
         Manifest? previous = null;
         string? previousText = null;
@@ -113,6 +119,8 @@ public sealed class StandardsEngine(ToolEnvironment environment)
         var context = new RenderContext { Templates = templates, Profiles = resolved, Scope = request.Scope, Assistants = assistants, IncludeMcp = mcp };
         if (mcp && resolved.McpServers.Count == 0)
             messages.Add("--mcp was requested but the selected profiles declare no MCP servers; no MCP configuration was generated.");
+        else if (mcp && !assistants.Contains("claude"))
+            messages.Add("--mcp only generates Claude Code's .mcp.json; GitHub Copilot MCP configuration is not generated (see docs/assistants.md).");
 
         var rendered = ContentBuilder.RenderShared(context)
             .Concat(assistants.SelectMany(a => AdapterRegistry.Get(a).Render(context)))
@@ -142,13 +150,25 @@ public sealed class StandardsEngine(ToolEnvironment environment)
             Files = actions.Where(a => a.Entry is not null).Select(a => a.Entry!).OrderBy(e => e.Path, StringComparer.Ordinal).ToList()
         };
 
-        var fileChanges = actions.Any(a => a.Writes || a.Deletes || a.Kind == PlanActionKind.Conflict);
-        if (fileChanges || previousText != ManifestStore.Serialize(manifest))
+        if (previous is not null && actions.Any(a => a.Kind == PlanActionKind.Conflict && a.Entry is not null))
+            await AddConflictBaselinesAsync(root, previous, actions, ct);
+
+        var changes = InstallPlanner.BuildFileChanges(root, actions);
+        if (changes.Count > 0)
             manifest.UpdatedAt = now;
+        var manifestText = ManifestStore.Serialize(manifest);
+        if (manifestText != previousText && previousText is not null && changes.Count == 0)
+        {
+            // Options or tracking changed without file changes: still record them, with a fresh timestamp.
+            manifest.UpdatedAt = now;
+            manifestText = ManifestStore.Serialize(manifest);
+        }
+        if (manifestText != previousText)
+            changes.Add(new FileChange(Manifest.RelativePath, manifestText, previousText is null ? Transaction.Absent : ContentHash.Compute(previousText)));
 
         var prepared = new PreparedOperation
         {
-            Plan = new InstallPlan { Root = root, Scope = request.Scope, Actions = actions, Manifest = manifest, PreviousManifestText = previousText },
+            Plan = new InstallPlan { Root = root, Scope = request.Scope, Actions = actions, Manifest = manifest, PreviousManifestText = previousText, Changes = changes },
             Templates = templates,
             Profiles = resolved,
             Detection = detection,
@@ -216,6 +236,64 @@ public sealed class StandardsEngine(ToolEnvironment environment)
             ConfigRoot = root,
             AllowCacheWrite = !request.DryRun
         };
+    }
+
+    /// <summary>
+    /// A project install must never write into an assistant's global configuration. That happens when the project
+    /// root is the home directory (its .claude/.copilot folders are the global ones).
+    /// </summary>
+    private void EnsureNotGlobalConfiguration(string root)
+    {
+        var home = Path.TrimEndingDirectorySeparator(Path.GetFullPath(environment.HomeDirectory));
+        if (string.Equals(Path.TrimEndingDirectorySeparator(root), home, SafePaths.PathComparison))
+            throw new InvalidOperationException(
+                $"'{root}' is your home directory. A project install here would modify the global Claude Code and Copilot configuration " +
+                "(~/.claude, ~/.copilot). Use --global for personal standards, or run in a repository folder.");
+    }
+
+    /// <summary>
+    /// Best effort: re-render the previously applied templates (offline only) so each conflict also gets a
+    /// <c>.base</c> copy for three-way merging. Skipped silently when the previous version is not available locally.
+    /// </summary>
+    private async Task AddConflictBaselinesAsync(string root, Manifest previous, IReadOnlyList<PlanAction> actions, CancellationToken ct)
+    {
+        Dictionary<string, RenderedFile> rendered;
+        try
+        {
+            var info = previous.Templates;
+            var bundled = Resolver.BundledVersion;
+            var request = new TemplateRequest
+            {
+                PackageId = info.PackageId,
+                Version = info.Origin == "directory" ? null : string.Equals(info.Version, bundled, StringComparison.OrdinalIgnoreCase) && info.PackageId == TemplateSet.DefaultPackageId ? null : info.Version,
+                TemplatesDirectory = info.Origin == "directory" && info.Directory is not null ? Path.GetFullPath(Path.Combine(root, info.Directory)) : null,
+                Offline = true,
+                AllowCacheWrite = false,
+                ConfigRoot = root
+            };
+            var templates = await Resolver.ResolveAsync(request, ct);
+            var profiles = ProfileResolver.Resolve(templates, previous.Profiles, previous.Exclude);
+            var context = new RenderContext { Templates = templates, Profiles = profiles, Scope = previous.Scope, Assistants = previous.Assistants, IncludeMcp = previous.Mcp };
+            rendered = ContentBuilder.RenderShared(context)
+                .Concat(previous.Assistants.SelectMany(a => AdapterRegistry.Get(a).Render(context)))
+                .ToDictionary(r => SafePaths.NormalizeRelative(r.Path), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return;
+        }
+
+        foreach (var action in actions.Where(a => a.Kind == PlanActionKind.Conflict && a.Entry is not null && a.Before is not null))
+        {
+            if (!rendered.TryGetValue(action.Path, out var baseFile))
+                continue;
+            var inner = baseFile.Content.Trim('\n');
+            if (baseFile.Mode == ManagedMode.Whole && ContentHash.Compute(baseFile.Content) == action.Entry!.Hash)
+                action.BaseContent = baseFile.Content;
+            else if (baseFile.Mode == ManagedMode.Block && ContentHash.Compute(inner) == action.Entry!.Hash &&
+                     ManagedBlock.Extract(action.Before!).State == ManagedBlock.BlockState.Present)
+                action.BaseContent = ManagedBlock.Replace(action.Before!, inner);
+        }
     }
 
     private static string StoreDirectory(string root, string directory)

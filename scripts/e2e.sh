@@ -36,6 +36,26 @@ if unzip -l "$PACKAGES/AgentStandards.Templates.$VERSION.nupkg" | grep -qE ' (co
   echo "templates package must not contain content/, lib/ or build assets" >&2; exit 1
 fi
 
+echo "== Version consistency and template contents"
+TEMPLATES_PKG="$PACKAGES/AgentStandards.Templates.$VERSION.nupkg"
+TOOL_PKG="$PACKAGES/AgentStandards.Tool.$VERSION.nupkg"
+[ -f "$TEMPLATES_PKG" ] || { echo "AgentStandards.Templates $VERSION is missing; both packages must share one version" >&2; exit 1; }
+[ "$(ls "$PACKAGES" | grep -cE '^AgentStandards\.(Tool|Templates)\..+\.nupkg$')" -eq 2 ] || { echo "expected exactly one version of each package in $PACKAGES" >&2; ls "$PACKAGES" >&2; exit 1; }
+sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1; else shasum -a 256 | cut -d' ' -f1; fi; }
+list_zip() { # <package> <prefix>: "<relative path> <sha256>" for every entry under prefix
+  unzip -Z1 "$1" | grep "^$2" | grep -v '/$' | sort | while IFS= read -r f; do printf '%s %s\n' "${f#"$2"}" "$(unzip -p "$1" "$f" | sha)"; done
+}
+list_dir() {
+  (cd "$1" && find . -type f ! -name '.*' | sed 's|^\./||' | LC_ALL=C sort | while IFS= read -r f; do printf '%s %s\n' "$f" "$(sha < "$f")"; done)
+}
+list_dir "$ROOT/templates/AgentStandards.Templates/agent-standards" | LC_ALL=C sort > "$WORK/source.txt"
+list_zip "$TEMPLATES_PKG" "agent-standards/" | LC_ALL=C sort > "$WORK/templates-pkg.txt"
+list_zip "$TOOL_PKG" "tools/net10.0/any/templates/agent-standards/" | LC_ALL=C sort > "$WORK/tool-bundle.txt"
+diff -u "$WORK/source.txt" "$WORK/templates-pkg.txt" || { echo "templates package differs from the source templates" >&2; exit 1; }
+diff -u "$WORK/source.txt" "$WORK/tool-bundle.txt" || { echo "tool's bundled templates differ from the source templates" >&2; exit 1; }
+unzip -p "$TOOL_PKG" tools/net10.0/any/templates/bundle.json | grep -q "\"version\": \"$VERSION\"" || { echo "bundle.json version does not match $VERSION" >&2; exit 1; }
+echo "$(wc -l < "$WORK/source.txt" | tr -d ' ') template files identical in source, templates package and tool bundle"
+
 dotnet tool install AgentStandards.Tool --version "$VERSION" --tool-path "$WORK/tools" --configfile "$WORK/nuget.config" >/dev/null
 TOOL="$WORK/tools/agent-standards"
 "$TOOL" --version

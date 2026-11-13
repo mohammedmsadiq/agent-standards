@@ -43,6 +43,7 @@ public static class TemplateLoader
                 continue;
 
             var normalized = NormalizeEntry(rel);
+            AddUnique(files, normalized, rel);
             if (file.Length > MaxFileBytes)
                 throw new TemplateException($"Template file '{rel}' exceeds {MaxFileBytes} bytes.");
             total += file.Length;
@@ -55,6 +56,18 @@ public static class TemplateLoader
 
     public static Dictionary<string, string> ReadPackage(Stream nupkg)
     {
+        try
+        {
+            return ReadPackageCore(nupkg);
+        }
+        catch (Exception ex) when (ex is InvalidDataException or IOException or NotSupportedException or ArgumentException)
+        {
+            throw new TemplateException($"Package is not a valid zip archive: {ex.Message}", ex);
+        }
+    }
+
+    private static Dictionary<string, string> ReadPackageCore(Stream nupkg)
+    {
         var files = new Dictionary<string, string>(StringComparer.Ordinal);
         long total = 0;
         using var zip = new ZipArchive(nupkg, ZipArchiveMode.Read, leaveOpen: true);
@@ -66,6 +79,7 @@ public static class TemplateLoader
 
             var rel = name[(PackageFolder.Length + 1)..];
             var normalized = NormalizeEntry(rel);
+            AddUnique(files, normalized, name);
 
             // Unix symlinks stored in zip external attributes (S_IFLNK).
             var unixMode = (entry.ExternalAttributes >> 16) & 0xF000;
@@ -77,17 +91,43 @@ public static class TemplateLoader
             total += entry.Length;
             CheckLimits(files.Count + 1, total);
 
+            // Do not trust the header's size: read at most MaxFileBytes + 1 bytes.
             using var stream = entry.Open();
-            using var buffer = new MemoryStream();
-            stream.CopyTo(buffer);
-            if (buffer.Length > MaxFileBytes)
-                throw new TemplateException($"Package entry '{name}' exceeds {MaxFileBytes} bytes.");
-            files[normalized] = Decode(buffer.ToArray(), name);
+            var bytes = ReadBounded(stream, MaxFileBytes, name);
+            files[normalized] = Decode(bytes, name);
         }
 
         if (files.Count == 0)
             throw new TemplateException($"Package does not contain a '{PackageFolder}/' template folder.");
         return files;
+    }
+
+    /// <summary>
+    /// Rejects duplicate entries and paths that differ only by case, which would silently overwrite each other or
+    /// collide on case-insensitive file systems (Windows, default macOS).
+    /// </summary>
+    private static void AddUnique(Dictionary<string, string> files, string normalized, string original)
+    {
+        if (files.ContainsKey(normalized))
+            throw new TemplateException($"Template entry '{original}' appears more than once.");
+        var collision = files.Keys.FirstOrDefault(k => string.Equals(k, normalized, StringComparison.OrdinalIgnoreCase));
+        if (collision is not null)
+            throw new TemplateException($"Template entries '{collision}' and '{normalized}' differ only by case.");
+        files[normalized] = "";
+    }
+
+    private static byte[] ReadBounded(Stream stream, long max, string name)
+    {
+        using var buffer = new MemoryStream();
+        var chunk = new byte[81920];
+        int read;
+        while ((read = stream.Read(chunk, 0, chunk.Length)) > 0)
+        {
+            buffer.Write(chunk, 0, read);
+            if (buffer.Length > max)
+                throw new TemplateException($"Package entry '{name}' exceeds {max} bytes.");
+        }
+        return buffer.ToArray();
     }
 
     private static string NormalizeEntry(string rel)
