@@ -8,16 +8,21 @@ workflow that requires confirmation and an approved environment.
 1. **Reserve ownership.** Sign in to nuget.org with the account (or organisation) that will own
    `AgentStandards.Tool` and `AgentStandards.Templates`. Consider requesting an ID prefix reservation for
    `AgentStandards.*`.
-2. **Create a scoped API key** on nuget.org: *Push new packages and package versions*, glob `AgentStandards.*`,
-   shortest practical expiry. Never paste it into files, commits, issues or logs.
-3. **Store it as an environment secret.** In the GitHub repository settings create an environment named
-   `nuget-org`, add required reviewers, restrict it to the `main` branch, and add the secret `NUGET_API_KEY` to the
-   environment (not to the repository).
+2. **Configure a Trusted Publishing policy** on nuget.org (*Trusted Publishing* in the account menu) for owner
+   `mohammed.sadiq`: repository `mohammedmsadiq/agent-standards`, workflow file `release.yml`, environment
+   `nuget-org`, package scope `AgentStandards.*`. No API key is created or stored.
+3. **Create the GitHub environment.** In the repository settings create an environment named `nuget-org`, add
+   required reviewers and restrict it to the `main` branch. It needs no secrets.
 4. **Check metadata before the first release:** `RepositoryUrl` and `PackageProjectUrl` in `Directory.Build.props`
    point to the GitHub repository; add a package icon if desired.
 
-NuGet.org also supports trusted publishing with short-lived tokens from GitHub Actions OIDC, which removes the
-long-lived API key; consider switching to it once the repository is public.
+### Authentication
+
+The publish job (and only that job) has `id-token: write`. After environment approval, the pinned
+[`NuGet/login`](https://github.com/NuGet/login) action exchanges the run's GitHub OIDC token for a short-lived
+NuGet API key (user `mohammed.sadiq`), which `dotnet nuget push` consumes. NuGet validates the repository, workflow
+file and environment against the policy above. The legacy `NUGET_API_KEY` secret is no longer used; delete it from
+the `nuget-org` environment if present. The build job has no token access.
 
 ## Release checklist
 
@@ -32,7 +37,7 @@ long-lived API key; consider switching to it once the repository is public.
    - The *build* job (no secrets) checks out the tag, verifies it points to a commit on `main` and that the package
      version equals the tag, then builds, validates templates, packs, tests, runs `scripts/e2e.sh` and uploads the
      packages with SHA-256 checksums.
-   - The *publish* job waits for approval of the `nuget-org` environment, verifies the checksums, and checks which
+   - The *publish* job waits for approval of the `nuget-org` environment, obtains a short-lived key via Trusted Publishing, verifies the checksums, and checks which
      versions already exist on nuget.org: if both exist it fails (bump the version); if one exists (a previous
      partial publication) it pushes only the missing one; otherwise it pushes the templates package, then the tool.
      It never uses `--skip-duplicate`.
@@ -41,12 +46,20 @@ long-lived API key; consider switching to it once the repository is public.
 
 Actions are pinned to full commit SHAs; update them deliberately.
 
+## Re-running a failed release
+
+The workflow file comes from the branch it is dispatched from (use `main`); the tag input only selects the source
+that is checked out and built. After a failed publish, fix the workflow on `main` and re-run with the same tag if no
+package reached nuget.org: the tag's commit need not contain the workflow fix, and the duplicate check pushes only
+what is missing. Never move or delete a tag; if the source must change, bump the version.
+
 ## Manual publishing (alternative)
 
 ```bash
 dotnet pack AgentStandards.slnx -c Release -o artifacts/packages
 scripts/e2e.sh
-# NUGET_API_KEY must come from a secure source (password manager, CI secret); do not type it into shell history.
+# Manual pushes need a NuGet API key from a secure source (password manager); do not type it into shell history.
+# Prefer the release workflow, which uses Trusted Publishing.
 dotnet nuget push artifacts/packages/AgentStandards.Templates.<version>.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
 dotnet nuget push artifacts/packages/AgentStandards.Tool.<version>.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json
 ```
