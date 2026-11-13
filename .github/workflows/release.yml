@@ -4,7 +4,8 @@ name: Release to NuGet.org
 #  - it runs only when started from the Actions tab with an existing release tag and the word "publish";
 #  - the tag must point to a commit on main, and the package version must equal the tag;
 #  - build and test run in a job without access to secrets; only the publish job uses the protected
-#    'nuget-org' environment (configure required reviewers) and its NUGET_API_KEY secret;
+#    'nuget-org' environment (configure required reviewers); it authenticates to NuGet.org with a short-lived
+#    API key obtained through Trusted Publishing (GitHub OIDC), so no long-lived secret is stored;
 #  - an already published version is never re-pushed silently: a fully published version fails the run,
 #    a partially published one pushes only the missing package, and the run fails unless both packages are
 #    visible on nuget.org afterwards.
@@ -94,6 +95,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     environment: nuget-org
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         shell: bash
@@ -107,13 +111,19 @@ jobs:
         working-directory: packages
         run: sha256sum -c SHA256SUMS
 
+      - name: Authenticate to NuGet.org (Trusted Publishing)
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1.2.0 (v1)
+        with:
+          user: mohammed.sadiq
+
       - name: Push missing packages (templates first)
         env:
           VERSION: ${{ needs.build.outputs.version }}
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
         run: |
           set -euo pipefail
-          test -n "$NUGET_API_KEY" || { echo "::error::NUGET_API_KEY is not configured for the nuget-org environment"; exit 1; }
+          test -n "$NUGET_API_KEY" || { echo "::error::NuGet Trusted Publishing did not return an API key"; exit 1; }
           lower_version="$(echo "$VERSION" | tr '[:upper:]' '[:lower:]')"
           exists() {
             local id="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
