@@ -7,6 +7,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [0.1.0-preview.1] - unreleased
 
+### Changed (fourth review)
+
+- `complete` with a missing or unreadable backup no longer tells you to delete the journal: it lists the managed
+  files that differ from the manifest and clears the interrupted state only with `--unverified` and confirmation.
+  `rollback` points to that diagnostic.
+- `resolve` reports changed files as `edited` instead of `merged`, and says that it does not check whether the
+  incoming changes were incorporated.
+
 ### Changed (third review)
 
 - New `complete` command: finishes an interrupted operation only after verifying every file it changed and the

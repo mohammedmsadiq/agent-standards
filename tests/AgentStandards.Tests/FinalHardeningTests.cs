@@ -540,6 +540,78 @@ public class FinalHardeningTests
         Assert.Contains("cannot be verified", missing.Err);
     }
 
+    [Fact]
+    public async Task Missing_backup_gives_a_diagnostic_and_needs_explicit_unverified_confirmation()
+    {
+        using var h = new Harness();
+        var (v1, v2) = Versions();
+        using var _ = v1;
+        using var __ = v2;
+        await h.Run("init", "--profile", "generic", "--templates", v1.Path);
+
+        // An update is interrupted after writing some files, cannot restore itself, and then its backup is lost.
+        var changes = 0;
+        using (Inject(h.Repo.Path, (s, _) => s == Transaction.Stage.Restore || (s == Transaction.Stage.Change && ++changes == 3)))
+            Assert.Equal(1, (await h.Run("update", "--templates", v2.Path)).Code);
+        var journal = OperationJournal.Read(h.Repo.Path)!;
+        Directory.Delete(h.Repo.Full($".agent-standards/backups/{journal.BackupId}"), recursive: true);
+        var before = State(h.Repo);
+
+        // Rollback cannot help and points at the diagnostic instead of at deleting files by hand.
+        var rollback = await h.Run("rollback", "--yes");
+        Assert.Equal(1, rollback.Code);
+        Assert.Contains("agent-standards complete", rollback.Err);
+
+        // complete reports what differs from the manifest and refuses to clear anything.
+        var diagnostic = await h.Run("complete");
+        Assert.Equal(1, diagnostic.Code);
+        Assert.Contains("differs from the manifest", diagnostic.Out);
+        Assert.Contains("--unverified", diagnostic.Err);
+        Assert.DoesNotContain("delete", diagnostic.Out + diagnostic.Err, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(before, State(h.Repo));
+
+        var json = await h.Run("complete", "--json");
+        Assert.Equal(1, json.Code);
+        Assert.True(json.Json["backupMissing"]!.GetValue<bool>());
+        Assert.False(json.Json["verified"]!.GetValue<bool>());
+        Assert.Contains(json.Json["checks"]!.AsArray(), c => !c!["matches"]!.GetValue<bool>());
+
+        // Clearing needs both --unverified and confirmation; a dry run changes nothing.
+        Assert.Equal(1, (await h.Run("complete", "--unverified")).Code);
+        Assert.Equal(0, (await h.Run("complete", "--unverified", "--dry-run")).Code);
+        Assert.Equal(before, State(h.Repo));
+
+        var cleared = await h.Run("complete", "--unverified", "--yes");
+        Assert.True(cleared.Code == 0, cleared.ToString());
+        Assert.Null(OperationJournal.Read(h.Repo.Path));
+
+        // Nothing is hidden afterwards: status still shows the half-written files, and update reconciles them.
+        Assert.Contains(StatusService.Get(h.Repo.Path, "x").Files, f => f.State == FileState.Modified);
+        var update = await h.Run("update", "--templates", v2.Path);
+        Assert.True(update.Code == 0, update.ToString());
+        Assert.All(StatusService.Get(h.Repo.Path, "x").Files, f => Assert.Equal(FileState.Unmodified, f.State));
+        Assert.Equal("2.0.0", ManifestStore.Load(h.Repo.Path)!.Templates.Version);
+    }
+
+    [Fact]
+    public async Task Unverified_flag_does_not_bypass_verification_when_the_backup_exists()
+    {
+        using var h = new Harness();
+        var (v1, v2) = Versions();
+        using var _ = v1;
+        using var __ = v2;
+        await h.Run("init", "--profile", "generic", "--templates", v1.Path);
+        var changes = 0;
+        using (Inject(h.Repo.Path, (s, _) => s == Transaction.Stage.Restore || (s == Transaction.Stage.Change && ++changes == 3)))
+            Assert.Equal(1, (await h.Run("update", "--templates", v2.Path)).Code);
+
+        var result = await h.Run("complete", "--unverified", "--yes");
+
+        Assert.Equal(1, result.Code); // partially written: still refused
+        Assert.Contains("Not completed", result.Out);
+        Assert.NotNull(OperationJournal.Read(h.Repo.Path));
+    }
+
     // ---- resolve confirmation and merge detection ------------------------------------------------------------
 
     private const string Testing = ".agent-standards/standards/testing.md";
@@ -567,7 +639,7 @@ public class FinalHardeningTests
     }
 
     [Fact]
-    public async Task Resolve_requires_confirmation_for_merged_files()
+    public async Task Resolve_requires_confirmation_for_edited_files()
     {
         var (h, v1, v2) = await WithConflict();
         using var _ = h;
@@ -578,7 +650,7 @@ public class FinalHardeningTests
         var noConfirm = await h.Run("resolve", Testing);
         Assert.Equal(1, noConfirm.Code);
         Assert.Contains("--yes", noConfirm.Err);
-        Assert.Contains("merged", noConfirm.Out);
+        Assert.Contains("edited since the conflict", noConfirm.Out);
 
         var jsonNoConfirm = await h.Run("resolve", Testing, "--json");
         Assert.Equal(1, jsonNoConfirm.Code);
@@ -587,7 +659,7 @@ public class FinalHardeningTests
 
         var ok = await h.Run("resolve", Testing, "--yes", "--json");
         Assert.Equal(0, ok.Code);
-        Assert.Equal("merged", ok.Json["items"]![0]!["state"]!.GetValue<string>());
+        Assert.Equal("edited", ok.Json["items"]![0]!["state"]!.GetValue<string>());
         Assert.Empty(ConflictService.Pending(ManifestStore.Load(h.Repo.Path)!));
     }
 
@@ -602,7 +674,7 @@ public class FinalHardeningTests
         Assert.Equal(2, (await h.Run("update", "--templates", v2.Path)).Code); // same incoming version again
 
         var dry = await h.Run("resolve", Testing, "--dry-run", "--json");
-        Assert.Equal("merged", dry.Json["items"]![0]!["state"]!.GetValue<string>()); // baseline for detection kept
+        Assert.Equal("edited", dry.Json["items"]![0]!["state"]!.GetValue<string>()); // baseline for detection kept
 
         // A conflict recorded by an older version has no local hash: it can be resolved, with confirmation.
         var path = h.Repo.Full(Manifest.RelativePath);

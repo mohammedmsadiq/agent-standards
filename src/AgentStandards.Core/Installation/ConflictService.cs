@@ -5,11 +5,14 @@ namespace AgentStandards.Core.Installation;
 
 public enum ResolveState
 {
-    /// <summary>The local file changed after the conflict was reported, so the developer edited (merged) it.</summary>
-    Merged,
-    /// <summary>The local file is exactly as it was when the conflict was reported: nothing was merged.</summary>
+    /// <summary>
+    /// The local file changed after the conflict was reported. That shows the developer edited it; it does not show
+    /// that the incoming changes were incorporated, which the toolkit cannot check.
+    /// </summary>
+    Edited,
+    /// <summary>The local file is exactly as it was when the conflict was reported: nothing can have been merged.</summary>
     Unchanged,
-    /// <summary>The conflict was recorded by an older version, so it cannot be told whether anything was merged.</summary>
+    /// <summary>The conflict was recorded by an older version, so it cannot be told whether the file was edited since.</summary>
     Unknown,
     /// <summary>The managed file (or its managed block) is missing.</summary>
     Missing
@@ -23,7 +26,7 @@ public sealed record ResolveResult(IReadOnlyList<string> Resolved, IReadOnlyList
     public IReadOnlyList<string> KeptCopies { get; init; } = [];
     /// <summary>What each selected file looks like compared with when its conflict was reported.</summary>
     public IReadOnlyList<ResolveItem> Items { get; init; } = [];
-    /// <summary>Files that were not merged; resolving them needs --accept-local.</summary>
+    /// <summary>Files not edited since their conflict was reported; resolving them needs --accept-local.</summary>
     public IReadOnlyList<string> Blocked { get; init; } = [];
 }
 
@@ -137,6 +140,6 @@ public static class ConflictService
             return ResolveState.Missing;
         if (entry.LocalHashAtConflict is null)
             return ResolveState.Unknown;
-        return hash == entry.LocalHashAtConflict ? ResolveState.Unchanged : ResolveState.Merged;
+        return hash == entry.LocalHashAtConflict ? ResolveState.Unchanged : ResolveState.Edited;
     }
 }

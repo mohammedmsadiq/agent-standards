@@ -201,10 +201,11 @@ The conflict stays pending — shown by `status`, `doctor` and `validate`, and e
 - the template returns to the previously applied version; or
 - you run `update --force` to take the template version.
 
-`resolve` shows each file as `merged` (changed since the conflict was reported), `unchanged` (nothing merged) or
+`resolve` shows each file as `edited` (changed since the conflict was reported), `unchanged` (nothing merged) or
 `unknown` (recorded by an older version), and asks for confirmation; scripts, CI and `--json` must pass `--yes`.
 An `unchanged` file is refused, because accepting it silently drops the incoming changes; pass `--accept-local` to
-keep your version deliberately. `resolve --dry-run` previews all of this without changing anything.
+keep your version deliberately. `edited` only means the file changed: the tool cannot check that the incoming
+changes are actually in it, so compare with the `.incoming` copy before confirming. `resolve --dry-run` previews all of this without changing anything.
 
 Unmanaged files that block an install cannot be "resolved"; rename or remove them, or use `--force`.
 
@@ -235,8 +236,12 @@ Every operation that changes files (`init`, `update`, `resolve`, `rollback`) fir
   loads; only then does it clear the journal. If anything differs it changes nothing and recommends `rollback`.
 - **If a recovery is itself interrupted**, rolling it back restores the original interrupted state and its journal;
   run `rollback` again to finish. Recovery is safe to repeat.
-- **If the journal's backup is missing** (the only case `complete` cannot verify), check the files with `git status`,
-  restore from version control if needed, then delete `.agent-standards/operation.json` by hand.
+- **If the journal's backup is missing or unreadable**, the operation can be neither verified nor rolled back.
+  `complete` then lists every managed file that differs from the manifest (each is either your own edit or a change
+  the interrupted operation wrote) and changes nothing. Review those files with `git status` and `git diff`, restore
+  from version control anything that is wrong, then run `complete --unverified` (it asks for confirmation; `--yes`
+  in scripts) to clear the interrupted state, and `update` to reconcile the managed files. Do not delete
+  `.agent-standards/operation.json` by hand: that skips this check.
 
 ### Concurrent operations
 

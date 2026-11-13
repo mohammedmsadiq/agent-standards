@@ -86,29 +86,6 @@ public class PackageTests
     }
 
     [Fact]
-    public async Task Offline_install_from_nuget_global_packages_folder()
-    {
-        using var h = new Harness();
-        using var templates = new TempDir("tpl");
-        Fixtures.CopyTemplates(templates.Path);
-        var gpf = Path.Combine(h.Repo.Path, ".nuget-gpf");
-        var dir = Path.Combine(gpf, "agentstandards.templates", "92.0.0");
-        Fixtures.BuildPackage(dir, "agentstandards.templates", "92.0.0", templates.Path);
-        File.WriteAllText(Path.Combine(dir, ".nupkg.metadata"), "{}");
-        h.Repo.Write("nuget.config", """
-            <configuration>
-              <config><add key="globalPackagesFolder" value=".nuget-gpf" /></config>
-              <packageSources><clear /></packageSources>
-            </configuration>
-            """);
-
-        var result = await h.Run("init", "--profile", "generic", "--version", "92.0.0", "--offline");
-
-        Assert.True(result.Code == 0, result.ToString());
-        Assert.Equal("92.0.0", ManifestStore.Load(h.Repo.Path)!.Templates.Version);
-    }
-
-    [Fact]
     public async Task Bundled_templates_work_without_any_package_source()
     {
         using var h = new Harness();

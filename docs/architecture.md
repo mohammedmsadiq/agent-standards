@@ -83,7 +83,12 @@ incoming hash (set while a conflict is unresolved), `L` = hash on disk and `N` =
 `agent-standards resolve` sets `B = P` and clears `P` (the local file is accepted as the merge result). When a
 conflict is first reported (or its incoming version changes) the manifest also records the local hash
 (`localHashAtConflict`); `resolve` refuses files whose content still has that hash unless `--accept-local` is given,
-and always needs confirmation (`--yes` when not interactive). Because `B`
+and always needs confirmation (`--yes` when not interactive). A file that changed is reported as `edited`, not
+"merged": the toolkit does not compare it with the incoming content.
+
+If the journal's backup is missing, `complete` cannot verify anything: it reports each managed file that differs
+from the manifest and clears the journal only with `--unverified` plus confirmation. The next `update` then
+reconciles the files (content already equal to the new template is adopted, the rest is updated or reported). Because `B`
 is kept until then, an unresolved conflict is reported on every update instead of disappearing after the first.
 
 Managed paths that the new templates no longer produce are reported as *obsolete*. With `--prune`, unmodified ones

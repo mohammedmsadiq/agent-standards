@@ -53,7 +53,7 @@ public static class RollbackService
             backup = BackupStore.Get(root, journal.BackupId)
                      ?? throw new InvalidOperationException(
                          $"An interrupted operation was detected, but its backup '{journal.BackupId}' is missing or unreadable. " +
-                         $"Check the managed files (for example with 'git status'), restore them from version control if needed, then delete {OperationJournal.RelativePath}.");
+                         "It cannot be rolled back automatically. Run 'agent-standards complete' to see which managed files differ from the manifest and how to clear the interrupted state safely.");
         }
         else
         {

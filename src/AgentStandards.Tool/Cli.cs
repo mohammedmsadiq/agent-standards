@@ -540,45 +540,102 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
 
     private static string ResolveExplanation(ResolveState state) => state switch
     {
-        ResolveState.Merged => "changed since the conflict was reported; it will be accepted as your merge",
+        ResolveState.Edited => "edited since the conflict was reported; it will be accepted exactly as it is (whether the incoming changes are in it is not checked)",
         ResolveState.Unchanged => "NOT changed since the conflict was reported; accepting it discards the incoming changes (needs --accept-local)",
         ResolveState.Missing => "file or managed block is missing (needs --accept-local)",
-        _ => "recorded by an older version; cannot tell whether you merged it"
+        _ => "recorded by an older version; cannot tell whether you edited it since"
     };
 
     private Command BuildCompleteCommand()
     {
         var command = new Command("complete", "Finish an interrupted operation whose changes were all written: verify every file, then clear the journal.");
+        var unverified = new Option<bool>("--unverified")
+        {
+            Description = "Only when the operation's backup is missing: clear the interrupted state without verification, after you have reviewed or restored the files listed by 'complete'."
+        };
+        command.Options.Add(unverified);
         command.Options.Add(_dryRun);
+        command.Options.Add(_yes);
         command.SetAction((parse, _) => Guard(parse, () =>
         {
-            var result = CompletionService.Complete(Root(parse), parse.GetValue(_dryRun));
-            if (parse.GetValue(_json))
+            var root = Root(parse);
+            var json = parse.GetValue(_json);
+            var allowUnverified = parse.GetValue(unverified);
+            var preview = CompletionService.Complete(root, dryRun: true, allowUnverified);
+
+            if (!preview.BackupMissing)
             {
-                WriteJson(new
+                var result = parse.GetValue(_dryRun) || !preview.Verified ? preview : CompletionService.Complete(root, dryRun: false);
+                if (json)
+                    WriteJson(CompletionJson(result));
+                else
                 {
-                    operation = result.Journal.Operation,
-                    backupId = result.Journal.BackupId,
-                    verified = result.Verified,
-                    applied = result.Applied,
-                    checks = result.Checks.Select(c => new { path = c.Path, matches = c.Matches, detail = c.Detail })
-                });
+                    stdout.WriteLine($"Checking interrupted '{result.Journal.Operation}' (backup {result.Journal.BackupId}):");
+                    foreach (var check in result.Checks.Where(c => !c.Matches || parse.GetValue(_verbose)))
+                        stdout.WriteLine($"  {(check.Matches ? "ok" : "MISMATCH"),-9} {check.Path} — {check.Detail}");
+                    stdout.WriteLine(!result.Verified
+                        ? "Not completed: the operation did not finish writing. Run 'agent-standards rollback' to restore the previous state."
+                        : result.Applied
+                            ? $"Completed: all {result.Checks.Count} change(s) verified; the operation is now finished."
+                            : $"Dry run: all {result.Checks.Count} change(s) verified; 'complete' would finish the operation.");
+                }
+                return Task.FromResult(result.Verified ? ExitOk : ExitError);
             }
-            else
+
+            // The backup is gone: nothing can be verified or rolled back. Show what differs from the manifest.
+            var differing = preview.Checks.Where(c => !c.Matches).ToList();
+            if (!json)
             {
-                stdout.WriteLine($"Checking interrupted '{result.Journal.Operation}' (backup {result.Journal.BackupId}):");
-                foreach (var check in result.Checks.Where(c => !c.Matches || parse.GetValue(_verbose)))
-                    stdout.WriteLine($"  {(check.Matches ? "ok" : "MISMATCH"),-9} {check.Path} — {check.Detail}");
-                stdout.WriteLine(!result.Verified
-                    ? "Not completed: the operation did not finish writing. Run 'agent-standards rollback' to restore the previous state."
-                    : result.Applied
-                        ? $"Completed: all {result.Checks.Count} change(s) verified; the operation is now finished."
-                        : $"Dry run: all {result.Checks.Count} change(s) verified; 'complete' would finish the operation.");
+                stdout.WriteLine($"The backup of the interrupted '{preview.Journal.Operation}' operation ({(preview.Journal.BackupId.Length > 0 ? preview.Journal.BackupId : "unknown")}) is missing or unreadable.");
+                stdout.WriteLine("Its changes cannot be verified and it cannot be rolled back. Managed files compared with the manifest:");
+                foreach (var check in preview.Checks.Where(c => !c.Matches || parse.GetValue(_verbose)))
+                    stdout.WriteLine($"  {(check.Matches ? "ok" : "CHECK"),-9} {check.Path} — {check.Detail}");
+                stdout.WriteLine(differing.Count == 0
+                    ? $"All {preview.Checks.Count} managed file(s) match the manifest."
+                    : $"{differing.Count} of {preview.Checks.Count} item(s) need your review.");
             }
-            return Task.FromResult(result.Verified ? ExitOk : ExitError);
+
+            const string nextSteps = "Review each listed file (for example with 'git status' and 'git diff') and restore from version control anything that is wrong. " +
+                                     "Then run 'agent-standards complete --unverified' to clear the interrupted state, and 'agent-standards update' to reconcile the managed files.";
+            if (!allowUnverified)
+            {
+                var message = "the interrupted operation cannot be verified because its backup is missing; nothing was changed. " + nextSteps;
+                if (json) WriteJson(CompletionJson(preview) with { error = message });
+                stderr.WriteLine($"error: {message}");
+                return Task.FromResult(ExitError);
+            }
+
+            if (parse.GetValue(_dryRun))
+            {
+                if (json) WriteJson(CompletionJson(preview));
+                else stdout.WriteLine("Dry run: 'complete --unverified' would clear the interrupted state without verification.");
+                return Task.FromResult(ExitOk);
+            }
+
+            if (!parse.GetValue(_yes))
+            {
+                if (!environment.IsInteractive || json)
+                    throw new InvalidOperationException("complete --unverified clears the interrupted state without verification; re-run with --yes to confirm that you have reviewed the files listed.");
+                if (!Confirm("Have you reviewed these files, and should the interrupted state be cleared without verification?"))
+                {
+                    stdout.WriteLine("Cancelled; nothing was changed.");
+                    return Task.FromResult(ExitOk);
+                }
+            }
+
+            var cleared = CompletionService.Complete(root, dryRun: false, unverified: true);
+            if (json) WriteJson(CompletionJson(cleared));
+            else stdout.WriteLine("Interrupted state cleared without verification. Run 'agent-standards update' to reconcile the managed files, then review the result with 'git diff'.");
+            return Task.FromResult(ExitOk);
         }));
         return command;
     }
+
+    private sealed record CompletionOutput(string operation, string backupId, bool backupMissing, bool verified, bool applied, object checks, string? error = null);
+
+    private static CompletionOutput CompletionJson(CompletionResult r) => new(
+        r.Journal.Operation, r.Journal.BackupId, r.BackupMissing, r.Verified, r.Applied,
+        r.Checks.Select(c => new { path = c.Path, matches = c.Matches, detail = c.Detail }));
 
     private static object RollbackJson(RollbackResult r) => new
     {
