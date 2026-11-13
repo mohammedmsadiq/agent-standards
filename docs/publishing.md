@@ -13,8 +13,8 @@ workflow that requires confirmation and an approved environment.
 3. **Store it as an environment secret.** In the GitHub repository settings create an environment named
    `nuget-org`, add required reviewers, restrict it to the `main` branch, and add the secret `NUGET_API_KEY` to the
    environment (not to the repository).
-4. **Fill in metadata before the first release:** set `RepositoryUrl` (and optionally `PackageProjectUrl`) in
-   `Directory.Build.props` once the public repository exists, and add a package icon if desired.
+4. **Check metadata before the first release:** `RepositoryUrl` and `PackageProjectUrl` in `Directory.Build.props`
+   point to the GitHub repository; add a package icon if desired.
 
 NuGet.org also supports trusted publishing with short-lived tokens from GitHub Actions OIDC, which removes the
 long-lived API key; consider switching to it once the repository is public.

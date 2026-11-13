@@ -10,14 +10,17 @@
     <Deterministic>true</Deterministic>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true' or '$(TF_BUILD)' == 'true'">true</ContinuousIntegrationBuild>
 
-    <!-- Package metadata (shared). RepositoryUrl intentionally unset until a public repository exists. -->
+    <!-- Package metadata (shared). -->
     <Authors>Mohammed Sadiq</Authors>
     <Copyright>Copyright (c) 2026 Mohammed Sadiq</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/mohammedmsadiq/agent-standards</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/mohammedmsadiq/agent-standards</PackageProjectUrl>
     <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
     <PackageTags>ai;agents;claude-code;github-copilot;coding-standards;agents-md;developer-tools</PackageTags>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageReleaseNotes>See CHANGELOG.md in the source repository.</PackageReleaseNotes>
+    <PackageReleaseNotes>See https://github.com/mohammedmsadiq/agent-standards/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <IncludeSymbols>true</IncludeSymbols>

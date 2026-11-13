@@ -242,7 +242,7 @@ Exit codes: `0` success, `1` error or validation failure, `2` completed with con
 ## Building from source
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/mohammedmsadiq/agent-standards.git
 cd agent-standards
 dotnet test AgentStandards.slnx
 dotnet pack AgentStandards.slnx -c Release -o artifacts/packages
