@@ -78,7 +78,7 @@ public static class Transaction
         var existingJournal = OperationJournal.Read(root);
         if (existingJournal is not null && existingJournal.BackupId != recoveringBackupId)
             throw new InterruptedOperationException(
-                $"An interrupted '{existingJournal.Operation}' operation (backup {existingJournal.BackupId}) was found. Run 'agent-standards rollback' to recover it first.");
+                $"An interrupted '{existingJournal.Operation}' operation (backup {existingJournal.BackupId}) was found. Run 'agent-standards rollback' to undo it, or 'agent-standards complete' if all its changes were written.");
 
         // 1. Verify nothing changed since planning, and capture originals.
         var originals = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -177,7 +177,7 @@ public static class Transaction
         {
             throw new OperationFailedException(
                 $"{operation} wrote all its changes, but could not remove {OperationJournal.RelativePath} ({ex.Message}), so the installation is marked as interrupted. " +
-                $"Run 'agent-standards rollback' to undo the operation (backup {record.Id}), or delete {OperationJournal.RelativePath} to keep it.", restored: false, ex);
+                "Run 'agent-standards complete' to verify every change and keep them, or 'agent-standards rollback' to undo the operation.", restored: false, ex);
         }
         return record.Id;
     }

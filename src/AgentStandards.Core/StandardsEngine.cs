@@ -69,7 +69,7 @@ public sealed class StandardsEngine(ToolEnvironment environment)
         if (OperationJournal.Read(root) is { } journal)
             throw new InterruptedOperationException(
                 $"An interrupted '{journal.Operation}' operation (backup {journal.BackupId}) was found in '{root}'. " +
-                "Run 'agent-standards rollback' to restore the state before it, then retry.");
+                "Run 'agent-standards rollback' to restore the state before it, or 'agent-standards complete' if all its changes were written, then retry.");
 
         Manifest? previous = null;
         string? previousText = null;

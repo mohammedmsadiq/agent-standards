@@ -57,6 +57,11 @@ public sealed class ManifestFile
     /// last applied baseline until the conflict is resolved.
     /// </summary>
     public string? PendingHash { get; set; }
+    /// <summary>
+    /// Hash of the local file when the pending conflict was reported, so <c>resolve</c> can tell whether the developer
+    /// changed (merged) it since. Null for conflicts recorded by older versions.
+    /// </summary>
+    public string? LocalHashAtConflict { get; set; }
 }
 
 public sealed class ManifestException(string message, Exception? inner = null) : Exception(message, inner);

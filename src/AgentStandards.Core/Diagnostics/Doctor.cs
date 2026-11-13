@@ -89,7 +89,7 @@ public static class Doctor
             checks.Add(new("Operation in progress", CheckStatus.Info, "another agent-standards process is changing this installation; results may change when it finishes"));
         else if (OperationJournal.Read(root) is { } journal)
             checks.Add(new("Interrupted operation", CheckStatus.Error,
-                $"'{journal.Operation}' (backup {journal.BackupId}) did not finish. Run 'agent-standards rollback' to restore the previous state."));
+                $"'{journal.Operation}' (backup {journal.BackupId}) did not finish. Run 'agent-standards rollback' to restore the previous state, or 'agent-standards complete' to keep it if every change was written."));
 
         if (scope == InstallScope.Project)
         {

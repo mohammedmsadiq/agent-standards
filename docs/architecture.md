@@ -80,7 +80,10 @@ incoming hash (set while a conflict is unresolved), `L` = hash on disk and `N` =
 | otherwise | conflict: keep local, keep `B`, set `P = N`, write `<path>.incoming` and (if the previous template set can be rebuilt offline) `<path>.base` |
 | entry, file deleted | leave deleted (`--force`: restore) |
 
-`agent-standards resolve` sets `B = P` and clears `P` (the local file is accepted as the merge result). Because `B`
+`agent-standards resolve` sets `B = P` and clears `P` (the local file is accepted as the merge result). When a
+conflict is first reported (or its incoming version changes) the manifest also records the local hash
+(`localHashAtConflict`); `resolve` refuses files whose content still has that hash unless `--accept-local` is given,
+and always needs confirmation (`--yes` when not interactive). Because `B`
 is kept until then, an unresolved conflict is reported on every update instead of disappearing after the first.
 
 Managed paths that the new templates no longer produce are reported as *obsolete*. With `--prune`, unmodified ones
@@ -99,7 +102,7 @@ installation's `OperationLock` and calls `Transaction.Run`, which:
 | 3. Write the journal `.agent-standards/operation.json` (it records any interrupted journal it is recovering) | unused backup removed, nothing modified |
 | 4. Apply the changes (each atomically: temporary file + rename); the manifest is last | changed files restored (files never reached are left alone), created directories removed if empty, backup removed |
 | 4b. Automatic restore fails | journal and backup kept: the installation is detectably interrupted; `rollback` recovers |
-| 5. Delete the journal | reported as a failure, not success; journal kept so `rollback` can undo |
+| 5. Delete the journal | reported as a failure, not success; journal kept: `complete` verifies every written hash and the manifest before clearing it, `rollback` undoes |
 
 Plans are made without the lock (so `--dry-run` and interactive confirmation never write); stage 1 re-checks each
 planned file's hash under the lock, so a concurrent change aborts the operation instead of being overwritten.

@@ -1,30 +1,50 @@
 using AgentStandards.Core.IO;
+using AgentStandards.Core.Rendering;
 
 namespace AgentStandards.Core.Installation;
+
+public enum ResolveState
+{
+    /// <summary>The local file changed after the conflict was reported, so the developer edited (merged) it.</summary>
+    Merged,
+    /// <summary>The local file is exactly as it was when the conflict was reported: nothing was merged.</summary>
+    Unchanged,
+    /// <summary>The conflict was recorded by an older version, so it cannot be told whether anything was merged.</summary>
+    Unknown,
+    /// <summary>The managed file (or its managed block) is missing.</summary>
+    Missing
+}
+
+public sealed record ResolveItem(string Path, ResolveState State);
 
 public sealed record ResolveResult(IReadOnlyList<string> Resolved, IReadOnlyList<string> RemainingConflicts, bool Applied, string? BackupId)
 {
     /// <summary>Conflict copies kept because the developer edited them.</summary>
     public IReadOnlyList<string> KeptCopies { get; init; } = [];
+    /// <summary>What each selected file looks like compared with when its conflict was reported.</summary>
+    public IReadOnlyList<ResolveItem> Items { get; init; } = [];
+    /// <summary>Files that were not merged; resolving them needs --accept-local.</summary>
+    public IReadOnlyList<string> Blocked { get; init; } = [];
 }
 
 /// <summary>
 /// Marks pending conflicts as resolved: the current local content is accepted as the merge result, the incoming
-/// template version becomes the new baseline, and the conflict copies are removed.
+/// template version becomes the new baseline, and the conflict copies are removed. A file left unchanged since its
+/// conflict was reported is only accepted with <c>acceptLocal</c>, because that discards the incoming changes.
 /// </summary>
 public static class ConflictService
 {
     public static IReadOnlyList<ManifestFile> Pending(Manifest manifest) => manifest.Files.Where(f => f.PendingHash is not null).ToList();
 
-    public static ResolveResult Resolve(string root, IReadOnlyList<string> paths, bool all, bool dryRun, bool force = false)
+    public static ResolveResult Resolve(string root, IReadOnlyList<string> paths, bool all, bool dryRun, bool force = false, bool acceptLocal = false)
     {
         if (dryRun)
-            return ResolveCore(null, root, paths, all, force);
+            return ResolveCore(null, root, paths, all, force, acceptLocal);
         using var held = OperationLock.Acquire(root, "resolve");
-        return ResolveCore(held, root, paths, all, force);
+        return ResolveCore(held, root, paths, all, force, acceptLocal);
     }
 
-    private static ResolveResult ResolveCore(OperationLock? held, string root, IReadOnlyList<string> paths, bool all, bool force)
+    private static ResolveResult ResolveCore(OperationLock? held, string root, IReadOnlyList<string> paths, bool all, bool force, bool acceptLocal)
     {
         if (OperationJournal.Read(root) is { } journal)
             throw new InterruptedOperationException($"An interrupted '{journal.Operation}' operation was found. Run 'agent-standards rollback' first.");
@@ -54,8 +74,14 @@ public static class ConflictService
 
         var resolved = selected.Select(f => f.Path).ToList();
         var remaining = pending.Keys.Except(resolved, StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToList();
+        var items = selected.Select(f => new ResolveItem(f.Path, Classify(root, f))).ToList();
+        var blocked = acceptLocal ? [] : items.Where(i => i.State is ResolveState.Unchanged or ResolveState.Missing).Select(i => i.Path).ToList();
         if (held is null || selected.Count == 0)
-            return new ResolveResult(resolved, remaining, false, null);
+            return new ResolveResult(resolved, remaining, false, null) { Items = items, Blocked = blocked };
+        if (blocked.Count > 0)
+            throw new InvalidOperationException(
+                $"Not resolved: {string.Join(", ", blocked)} {(blocked.Count == 1 ? "has" : "have")} not changed since the conflict was reported, so nothing was merged. " +
+                $"Merge the changes you want from {InstallPlanner.ConflictsFolder}/<path>.incoming first, or pass --accept-local to keep your version and discard the incoming changes.");
 
         var changes = new List<FileChange>();
         var kept = new List<string>();
@@ -64,6 +90,7 @@ public static class ConflictService
         {
             entry.Hash = entry.PendingHash!;
             entry.PendingHash = null;
+            entry.LocalHashAtConflict = null;
             var (incoming, basePath) = InstallPlanner.ConflictCopyPaths(entry.Path);
             foreach (var copy in new[] { incoming, basePath })
             {
@@ -93,6 +120,23 @@ public static class ConflictService
             TemplatesVersionAfter = manifest.Templates.Version
         }, DateTimeOffset.UtcNow);
         BackupStore.Trim(root);
-        return new ResolveResult(resolved, remaining, true, id) { KeptCopies = kept };
+        return new ResolveResult(resolved, remaining, true, id) { KeptCopies = kept, Items = items };
+    }
+
+    private static ResolveState Classify(string root, ManifestFile entry)
+    {
+        var text = AtomicFile.ReadTextOrNull(root, entry.Path);
+        if (text is null)
+            return ResolveState.Missing;
+        string? hash = entry.Mode switch
+        {
+            ManagedMode.Block => ManagedBlock.Extract(text) is (ManagedBlock.BlockState.Present, { } inner) ? ContentHash.Compute(inner) : null,
+            _ => ContentHash.Compute(text)
+        };
+        if (hash is null)
+            return ResolveState.Missing;
+        if (entry.LocalHashAtConflict is null)
+            return ResolveState.Unknown;
+        return hash == entry.LocalHashAtConflict ? ResolveState.Unchanged : ResolveState.Merged;
     }
 }

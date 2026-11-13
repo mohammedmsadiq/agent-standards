@@ -52,7 +52,7 @@ public class UpdateTests
         Assert.Contains("(team edit)", h.Repo.Read(".agent-standards/standards/security.md"));
         Assert.Contains(StatusService.Get(h.Repo.Path, "x").Files, f => f.Path.EndsWith("security.md") && f.State == FileState.Conflict);
 
-        var resolve = await h.Run("resolve", ".agent-standards/standards/security.md");
+        var resolve = await h.Run("resolve", ".agent-standards/standards/security.md", "--accept-local", "--yes");
         Assert.True(resolve.Code == 0, resolve.ToString());
         Assert.False(h.Repo.Exists(".agent-standards/conflicts/.agent-standards/standards/security.md.incoming"));
         Assert.Equal(0, (await h.Run("update", "--templates", v2.Path)).Code);

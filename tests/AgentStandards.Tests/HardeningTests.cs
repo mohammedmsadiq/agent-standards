@@ -279,7 +279,7 @@ public class HardeningTests
         Assert.Equal(2, dry.Json["resolved"]!.AsArray().Count);
         Assert.Equal(2, ConflictService.Pending(ManifestStore.Load(h.Repo.Path)!).Count);
 
-        Assert.Equal(0, (await h.Run("resolve", "--all")).Code);
+        Assert.Equal(0, (await h.Run("resolve", "--all", "--accept-local", "--yes")).Code);
         Assert.Empty(ConflictService.Pending(ManifestStore.Load(h.Repo.Path)!));
         Assert.Equal(0, (await h.Run("update", "--templates", v2.Path)).Code);
         Assert.Contains("mine", h.Repo.Read(".agent-standards/standards/testing.md"));

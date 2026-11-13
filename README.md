@@ -68,7 +68,7 @@ agent-standards init --profile dotnet --exclude skill:review-performance,agent:m
 agent-standards update --dry-run
 agent-standards diff
 agent-standards list profiles
-agent-standards resolve --all
+agent-standards resolve --all --dry-run
 agent-standards rollback --dry-run
 agent-standards init --global       # personal standards for Claude Code and Copilot
 ```
@@ -196,10 +196,15 @@ copy yourself to get a fresh one on the next `update`.
 The conflict stays pending — shown by `status`, `doctor` and `validate`, and every `update` exits with code 2 — until:
 
 - you merge what you want from `.incoming` into your file and run `agent-standards resolve <path>` (or
-  `resolve --all`); your file becomes the accepted version and the copies are removed; or
+  `resolve --all`); your file, exactly as it is, becomes the accepted version and unedited copies are removed; or
 - your file ends up identical to the incoming version (resolved automatically on the next `update`); or
 - the template returns to the previously applied version; or
 - you run `update --force` to take the template version.
+
+`resolve` shows each file as `merged` (changed since the conflict was reported), `unchanged` (nothing merged) or
+`unknown` (recorded by an older version), and asks for confirmation; scripts, CI and `--json` must pass `--yes`.
+An `unchanged` file is refused, because accepting it silently drops the incoming changes; pass `--accept-local` to
+keep your version deliberately. `resolve --dry-run` previews all of this without changing anything.
 
 Unmanaged files that block an install cannot be "resolved"; rename or remove them, or use `--force`.
 
@@ -225,15 +230,17 @@ Every operation that changes files (`init`, `update`, `resolve`, `rollback`) fir
   and `init`/`update` refuse to run until you recover with `agent-standards rollback`.
 - **If writing the backup or the journal fails**, nothing has been modified and the unused backup is removed.
 - **If the journal cannot be removed** after all changes were written, the command exits 1 (it does not report
-  success) and the installation is marked as interrupted: run `rollback` to undo, or delete the journal to keep it.
+  success) and the installation is marked as interrupted: run `rollback` to undo, or `complete` to keep it.
+  `complete` checks that every file the operation changed has exactly the content it wrote and that the manifest
+  loads; only then does it clear the journal. If anything differs it changes nothing and recommends `rollback`.
 - **If a recovery is itself interrupted**, rolling it back restores the original interrupted state and its journal;
   run `rollback` again to finish. Recovery is safe to repeat.
-- **If the journal's backup is missing**, check the files with `git status`, restore from version control if needed,
-  then delete `.agent-standards/operation.json`.
+- **If the journal's backup is missing** (the only case `complete` cannot verify), check the files with `git status`,
+  restore from version control if needed, then delete `.agent-standards/operation.json` by hand.
 
 ### Concurrent operations
 
-Commands that change an installation (`init`, `update`, `resolve`, `rollback`) take an exclusive lock on
+Commands that change an installation (`init`, `update`, `resolve`, `rollback`, `complete`) take an exclusive lock on
 `.agent-standards/lock` (in the home directory for `--global`). A second command fails at once with "Another
 agent-standards operation is running" instead of waiting, so processes cannot deadlock. The lock is an open file
 handle (`FileShare.None`: a sharing lock on Windows, `flock` on Linux and macOS), so the operating system releases it
@@ -247,6 +254,8 @@ agent-standards rollback --list
 agent-standards rollback --dry-run      # exactly the actions rollback will take
 agent-standards rollback --yes          # undo the most recent operation (or recover an interrupted one)
 agent-standards rollback --to <id> --yes
+agent-standards complete --dry-run      # check whether an interrupted operation finished writing
+agent-standards complete                # keep it (only if every change verifies)
 ```
 
 Files you changed after the operation are kept (`skip-modified`) and stay tracked against the version they are

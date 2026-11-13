@@ -132,7 +132,7 @@ public class FinalHardeningTests
 
         using (OperationLock.Acquire(h.Repo.Path, "test"))
         {
-            foreach (var args in new[] { new[] { "update", "--templates", v1.Path }, ["init", "--force"], ["resolve", "--all"], ["rollback", "--yes"] })
+            foreach (var args in new[] { new[] { "update", "--templates", v1.Path }, ["init", "--force"], ["resolve", "--all", "--accept-local", "--yes"], ["rollback", "--yes"] })
             {
                 var result = await h.Run(args);
                 Assert.True(result.Code == 1, $"{string.Join(' ', args)}: {result}");
@@ -140,11 +140,11 @@ public class FinalHardeningTests
             }
             Assert.Equal(before, State(h.Repo));
 
-            foreach (var args in new[] { new[] { "status" }, ["validate"], ["doctor"], ["diff"], ["list"], ["update", "--dry-run"], ["rollback", "--dry-run"], ["resolve", "--all", "--dry-run"] })
+            foreach (var args in new[] { new[] { "status" }, ["validate"], ["doctor"], ["diff"], ["list"], ["update", "--dry-run"], ["rollback", "--dry-run"], ["resolve", "--all", "--dry-run", "--accept-local"] })
                 Assert.True((await h.Run(args)).Code is 0 or 2, string.Join(' ', args));
         }
 
-        Assert.Equal(0, (await h.Run("resolve", "--all")).Code);
+        Assert.Equal(0, (await h.Run("resolve", "--all", "--accept-local", "--yes")).Code);
     }
 
     [Fact]
@@ -247,7 +247,7 @@ public class FinalHardeningTests
         using var ___ = v2;
         h.Repo.Write(Incoming, h.Repo.Read(Incoming) + "\nmerge notes\n");
 
-        var resolve = await h.Run("resolve", "--all");
+        var resolve = await h.Run("resolve", "--all", "--accept-local", "--yes");
         Assert.Equal(0, resolve.Code);
         Assert.Contains("kept", resolve.Out);
         Assert.True(h.Repo.Exists(Incoming));
@@ -282,7 +282,7 @@ public class FinalHardeningTests
 
         Assert.Equal(2, (await h.Run("update", "--templates", v2.Path)).Code);
         Assert.Equal("my annotated base", h.Repo.Read(BaseCopy)); // still not overwritten
-        Assert.Equal(0, (await h.Run("resolve", "--all", "--force")).Code);
+        Assert.Equal(0, (await h.Run("resolve", "--all", "--force", "--accept-local", "--yes")).Code);
         Assert.False(h.Repo.Exists(BaseCopy));
         Assert.False(h.Repo.Exists(Incoming));
     }
@@ -451,6 +451,168 @@ public class FinalHardeningTests
         }
         Assert.Equal(before, State(h.Repo));
         Assert.Null(OperationJournal.Read(h.Repo.Path));
+    }
+
+    // ---- complete --------------------------------------------------------------------------------------------
+
+    private static async Task<(Harness h, TempDir v1, TempDir v2)> WithCleanupFailure()
+    {
+        var h = new Harness();
+        var (v1, v2) = Versions();
+        await h.Run("init", "--profile", "generic", "--templates", v1.Path);
+        using (Inject(h.Repo.Path, (s, _) => s == Transaction.Stage.JournalCleanup))
+            Assert.Equal(1, (await h.Run("update", "--templates", v2.Path)).Code);
+        Assert.NotNull(OperationJournal.Read(h.Repo.Path));
+        return (h, v1, v2);
+    }
+
+    [Fact]
+    public async Task Complete_verifies_a_fully_written_operation_and_clears_the_journal()
+    {
+        var (h, v1, v2) = await WithCleanupFailure();
+        using var _ = h;
+        using var __ = v1;
+        using var ___ = v2;
+        var written = State(h.Repo);
+        written.Remove(Path.Combine(".agent-standards", "operation.json")); // the only thing complete removes
+
+        var dry = await h.Run("complete", "--dry-run");
+        Assert.Equal(0, dry.Code);
+        Assert.Contains("would finish", dry.Out);
+        Assert.NotNull(OperationJournal.Read(h.Repo.Path));
+
+        var json = await h.Run("complete", "--json");
+        Assert.Equal(0, json.Code);
+        Assert.True(json.Json["verified"]!.GetValue<bool>());
+        Assert.True(json.Json["applied"]!.GetValue<bool>());
+        Assert.Null(OperationJournal.Read(h.Repo.Path));
+        Assert.Equal(written, State(h.Repo)); // files and manifest untouched
+        Assert.Equal("2.0.0", ManifestStore.Load(h.Repo.Path)!.Templates.Version);
+        Assert.Equal(0, (await h.Run("status")).Code);
+        Assert.Equal(1, (await h.Run("complete")).Code); // nothing left to complete
+    }
+
+    [Fact]
+    public async Task Complete_refuses_a_partially_written_operation()
+    {
+        using var h = new Harness();
+        var (v1, v2) = Versions();
+        using var _ = v1;
+        using var __ = v2;
+        await h.Run("init", "--profile", "generic", "--templates", v1.Path);
+        var before = State(h.Repo);
+        var changes = 0;
+        using (Inject(h.Repo.Path, (s, _) => s == Transaction.Stage.Restore || (s == Transaction.Stage.Change && ++changes == 3)))
+            Assert.Equal(1, (await h.Run("update", "--templates", v2.Path)).Code);
+
+        var result = await h.Run("complete");
+
+        Assert.Equal(1, result.Code);
+        Assert.Contains("MISMATCH", result.Out);
+        Assert.Contains("Not completed", result.Out);
+        Assert.NotNull(OperationJournal.Read(h.Repo.Path));
+        Assert.Equal(0, (await h.Run("rollback", "--yes")).Code);
+        Assert.Equal(before, State(h.Repo));
+    }
+
+    [Fact]
+    public async Task Complete_handles_locks_missing_backups_and_pending_recoveries()
+    {
+        var (h, v1, v2) = await WithCleanupFailure();
+        using var _ = h;
+        using var __ = v1;
+        using var ___ = v2;
+        var journal = OperationJournal.Read(h.Repo.Path)!;
+
+        using (OperationLock.Acquire(h.Repo.Path, "test"))
+            Assert.Contains("is running", (await h.Run("complete")).Err);
+
+        // A journal that was recovering an earlier interruption hands that one back.
+        var earlier = new OperationJournal { BackupId = "20200101T000000000Z-update", Operation = "update" };
+        journal.Previous = earlier;
+        OperationJournal.Write(h.Repo.Path, journal);
+        Assert.Equal(0, (await h.Run("complete")).Code);
+        Assert.Equal(earlier.BackupId, OperationJournal.Read(h.Repo.Path)!.BackupId);
+
+        // That earlier backup does not exist: verification is impossible and the error says what to do.
+        var missing = await h.Run("complete");
+        Assert.Equal(1, missing.Code);
+        Assert.Contains("cannot be verified", missing.Err);
+    }
+
+    // ---- resolve confirmation and merge detection ------------------------------------------------------------
+
+    private const string Testing = ".agent-standards/standards/testing.md";
+
+    [Fact]
+    public async Task Resolve_refuses_unmerged_files_unless_accept_local()
+    {
+        var (h, v1, v2) = await WithConflict(); // local edit made before the conflict, nothing merged since
+        using var _ = h;
+        using var __ = v1;
+        using var ___ = v2;
+
+        var refused = await h.Run("resolve", Testing, "--yes");
+        Assert.Equal(1, refused.Code);
+        Assert.Contains("unchanged since the conflict", refused.Err);
+        Assert.Single(ConflictService.Pending(ManifestStore.Load(h.Repo.Path)!));
+
+        var dry = await h.Run("resolve", Testing, "--dry-run", "--json");
+        Assert.Equal("unchanged", dry.Json["items"]![0]!["state"]!.GetValue<string>());
+        Assert.Equal(Testing, dry.Json["blocked"]![0]!.GetValue<string>());
+
+        Assert.Equal(0, (await h.Run("resolve", Testing, "--accept-local", "--yes")).Code);
+        Assert.Empty(ConflictService.Pending(ManifestStore.Load(h.Repo.Path)!));
+        Assert.Contains("mine", h.Repo.Read(Testing));
+    }
+
+    [Fact]
+    public async Task Resolve_requires_confirmation_for_merged_files()
+    {
+        var (h, v1, v2) = await WithConflict();
+        using var _ = h;
+        using var __ = v1;
+        using var ___ = v2;
+        h.Repo.Write(Testing, h.Repo.Read(Testing) + "\nmerged from incoming\n"); // the developer merges
+
+        var noConfirm = await h.Run("resolve", Testing);
+        Assert.Equal(1, noConfirm.Code);
+        Assert.Contains("--yes", noConfirm.Err);
+        Assert.Contains("merged", noConfirm.Out);
+
+        var jsonNoConfirm = await h.Run("resolve", Testing, "--json");
+        Assert.Equal(1, jsonNoConfirm.Code);
+        Assert.NotNull(jsonNoConfirm.Json["error"]);
+        Assert.Single(ConflictService.Pending(ManifestStore.Load(h.Repo.Path)!));
+
+        var ok = await h.Run("resolve", Testing, "--yes", "--json");
+        Assert.Equal(0, ok.Code);
+        Assert.Equal("merged", ok.Json["items"]![0]!["state"]!.GetValue<string>());
+        Assert.Empty(ConflictService.Pending(ManifestStore.Load(h.Repo.Path)!));
+    }
+
+    [Fact]
+    public async Task Merge_detection_survives_repeated_updates_and_older_manifests()
+    {
+        var (h, v1, v2) = await WithConflict();
+        using var _ = h;
+        using var __ = v1;
+        using var ___ = v2;
+        h.Repo.Write(Testing, h.Repo.Read(Testing) + "\npartial merge\n");
+        Assert.Equal(2, (await h.Run("update", "--templates", v2.Path)).Code); // same incoming version again
+
+        var dry = await h.Run("resolve", Testing, "--dry-run", "--json");
+        Assert.Equal("merged", dry.Json["items"]![0]!["state"]!.GetValue<string>()); // baseline for detection kept
+
+        // A conflict recorded by an older version has no local hash: it can be resolved, with confirmation.
+        var path = h.Repo.Full(Manifest.RelativePath);
+        var manifest = JsonNode.Parse(File.ReadAllText(path))!;
+        foreach (var file in manifest["files"]!.AsArray())
+            file!.AsObject().Remove("localHashAtConflict");
+        File.WriteAllText(path, manifest.ToJsonString());
+        var unknown = await h.Run("resolve", Testing, "--dry-run", "--json");
+        Assert.Equal("unknown", unknown.Json["items"]![0]!["state"]!.GetValue<string>());
+        Assert.Equal(0, (await h.Run("resolve", Testing, "--yes")).Code);
     }
 
     // ---- Existing developer configuration --------------------------------------------------------------------

@@ -7,6 +7,14 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [0.1.0-preview.1] - unreleased
 
+### Changed (third review)
+
+- New `complete` command: finishes an interrupted operation only after verifying every file it changed and the
+  manifest; recovery messages no longer suggest deleting the journal by hand.
+- `resolve` explains what it accepts, asks for confirmation (`--yes` required when not interactive or with `--json`)
+  and refuses files unchanged since the conflict was reported unless `--accept-local` is given. The manifest records
+  `localHashAtConflict` to detect this.
+
 ### Changed (final pre-release review)
 
 - Exclusive cross-process operation lock (`.agent-standards/lock`) for `init`, `update`, `resolve` and `rollback`;
@@ -44,7 +52,7 @@ and the project uses [Semantic Versioning](https://semver.org/).
 ### Added
 
 - `agent-standards` .NET tool (`AgentStandards.Tool`) with `init`, `update`, `diff`, `status`, `validate`, `list`,
-  `doctor`, `rollback` and `resolve` commands, `--json` output and project or `--global` scope.
+  `doctor`, `rollback`, `resolve` and `complete` commands, `--json` output and project or `--global` scope.
 - `AgentStandards.Templates` content package with 22 standards, 9 path-scoped rules, 15 skills, 9 specialist agents
   and 7 profiles: `generic`, `dotnet`, `maui`, `aspnetcore`, `webapi`, `blazor`, `classlib`.
 - Claude Code adapter: `CLAUDE.md` (imports `AGENTS.md`), `.claude/rules`, `.claude/skills`, `.claude/agents`.

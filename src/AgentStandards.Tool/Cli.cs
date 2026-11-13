@@ -67,6 +67,7 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
         root.Subcommands.Add(BuildDoctorCommand());
         root.Subcommands.Add(BuildRollbackCommand());
         root.Subcommands.Add(BuildResolveCommand());
+        root.Subcommands.Add(BuildCompleteCommand());
 
         var parse = root.Parse(args);
         return await parse.InvokeAsync(new InvocationConfiguration { Output = stdout, Error = stderr }, cancellationToken);
@@ -220,7 +221,7 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
             if (report.OperationRunning)
                 stdout.WriteLine("IN PROGRESS: another agent-standards operation is changing this installation; run status again when it finishes.");
             else if (report.InterruptedOperation is { } interrupted)
-                stdout.WriteLine($"INTERRUPTED: '{interrupted.Operation}' (backup {interrupted.BackupId}) did not finish. Run 'agent-standards rollback' to restore the previous state.");
+                stdout.WriteLine($"INTERRUPTED: '{interrupted.Operation}' (backup {interrupted.BackupId}) did not finish. Run 'agent-standards rollback' to restore the previous state, or 'agent-standards complete' to keep it if every change was written.");
             if (report.NewerBundledTemplates)
                 stdout.WriteLine($"Update available: templates {report.BundledVersion} (run 'agent-standards update --dry-run').");
             stdout.WriteLine(report.Backups.Count > 0 ? $"Backups:    {report.Backups.Count} (latest {report.Backups[0].Id})" : "Backups:    none");
@@ -453,31 +454,128 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
 
     private Command BuildResolveCommand()
     {
-        var command = new Command("resolve", "Mark conflicts as resolved: accept the current local file as the merge result and remove the conflict copies.");
+        var command = new Command("resolve",
+            "Accept your current file as the merge result of a conflict: the incoming version becomes the new baseline and the conflict copies are removed.");
         var paths = new Argument<string[]>("paths") { Description = "Managed file path(s) with a pending conflict.", Arity = ArgumentArity.ZeroOrMore };
         var all = new Option<bool>("--all") { Description = "Resolve every pending conflict." };
+        var acceptLocal = new Option<bool>("--accept-local") { Description = "Also accept files you have not changed since the conflict, discarding the incoming changes." };
         command.Arguments.Add(paths);
         command.Options.Add(all);
+        command.Options.Add(acceptLocal);
         command.Options.Add(_dryRun);
         command.Options.Add(_force);
+        command.Options.Add(_yes);
         command.SetAction((parse, _) => Guard(parse, () =>
         {
-            var result = ConflictService.Resolve(Root(parse), parse.GetValue(paths) ?? [], parse.GetValue(all), parse.GetValue(_dryRun), parse.GetValue(_force));
-            if (parse.GetValue(_json))
-                WriteJson(new { resolved = result.Resolved, remaining = result.RemainingConflicts, keptCopies = result.KeptCopies, applied = result.Applied, backupId = result.BackupId });
+            var root = Root(parse);
+            var json = parse.GetValue(_json);
+            var selected = parse.GetValue(paths) ?? [];
+            var preview = ConflictService.Resolve(root, selected, parse.GetValue(all), dryRun: true, parse.GetValue(_force), parse.GetValue(acceptLocal));
+
+            if (!json)
+            {
+                foreach (var item in preview.Items)
+                    stdout.WriteLine($"  {ResolveLabel(item.State),-10} {item.Path} — {ResolveExplanation(item.State)}");
+                if (preview.Items.Count > 0)
+                    stdout.WriteLine("Resolving accepts each file exactly as it is now; incoming changes that are not in it are dropped.");
+            }
+
+            if (preview.Items.Count == 0)
+            {
+                if (json) WriteJson(ResolveJson(preview));
+                else stdout.WriteLine("No pending conflicts.");
+                return Task.FromResult(ExitOk);
+            }
+
+            if (preview.Blocked.Count > 0)
+            {
+                var message = $"Not resolved: {string.Join(", ", preview.Blocked)} unchanged since the conflict was reported. " +
+                              $"Merge from {InstallPlanner.ConflictsFolder}/<path>.incoming first, or pass --accept-local to keep your version and discard the incoming changes.";
+                if (json) WriteJson(ResolveJson(preview) with { error = message });
+                stderr.WriteLine($"error: {message}");
+                return Task.FromResult(ExitError);
+            }
+
+            if (parse.GetValue(_dryRun))
+            {
+                if (json) WriteJson(ResolveJson(preview));
+                else stdout.WriteLine("Dry run: no files were changed.");
+                return Task.FromResult(ExitOk);
+            }
+
+            if (!parse.GetValue(_yes))
+            {
+                if (!environment.IsInteractive || json)
+                    throw new InvalidOperationException("resolve accepts your current files as the merge result; re-run with --yes to confirm (or --dry-run to preview).");
+                if (!Confirm("Accept these files as resolved?"))
+                {
+                    stdout.WriteLine("Cancelled; no files were changed.");
+                    return Task.FromResult(ExitOk);
+                }
+            }
+
+            var result = ConflictService.Resolve(root, selected, parse.GetValue(all), dryRun: false, parse.GetValue(_force), parse.GetValue(acceptLocal));
+            if (json)
+                WriteJson(ResolveJson(result));
             else
             {
-                foreach (var path in result.Resolved)
-                    stdout.WriteLine($"  resolved     {path}");
-                stdout.WriteLine(result.Resolved.Count == 0 ? "No pending conflicts." :
-                    result.Applied ? $"Resolved {result.Resolved.Count} conflict(s); local versions are now the baseline for future updates."
-                                   : "Dry run: no files were changed.");
+                stdout.WriteLine($"Resolved {result.Resolved.Count} conflict(s); these files are now the baseline for future updates.");
                 foreach (var copy in result.KeptCopies)
-                    stdout.WriteLine($"  kept         {copy} — edited by you; delete it when finished (or re-run with --force)");
+                    stdout.WriteLine($"  kept       {copy} — edited by you; delete it when finished (or re-run with --force)");
                 if (result.RemainingConflicts.Count > 0)
                     stdout.WriteLine($"Still unresolved: {string.Join(", ", result.RemainingConflicts)}");
             }
             return Task.FromResult(ExitOk);
+        }));
+        return command;
+    }
+
+    private sealed record ResolveOutput(object resolved, object remaining, object items, object blocked, object keptCopies, bool applied, string? backupId, string? error = null);
+
+    private static ResolveOutput ResolveJson(ResolveResult r) => new(
+        r.Resolved, r.RemainingConflicts,
+        r.Items.Select(i => new { path = i.Path, state = ResolveLabel(i.State) }), r.Blocked, r.KeptCopies, r.Applied, r.BackupId);
+
+    private static string ResolveLabel(ResolveState state) => state.ToString().ToLowerInvariant();
+
+    private static string ResolveExplanation(ResolveState state) => state switch
+    {
+        ResolveState.Merged => "changed since the conflict was reported; it will be accepted as your merge",
+        ResolveState.Unchanged => "NOT changed since the conflict was reported; accepting it discards the incoming changes (needs --accept-local)",
+        ResolveState.Missing => "file or managed block is missing (needs --accept-local)",
+        _ => "recorded by an older version; cannot tell whether you merged it"
+    };
+
+    private Command BuildCompleteCommand()
+    {
+        var command = new Command("complete", "Finish an interrupted operation whose changes were all written: verify every file, then clear the journal.");
+        command.Options.Add(_dryRun);
+        command.SetAction((parse, _) => Guard(parse, () =>
+        {
+            var result = CompletionService.Complete(Root(parse), parse.GetValue(_dryRun));
+            if (parse.GetValue(_json))
+            {
+                WriteJson(new
+                {
+                    operation = result.Journal.Operation,
+                    backupId = result.Journal.BackupId,
+                    verified = result.Verified,
+                    applied = result.Applied,
+                    checks = result.Checks.Select(c => new { path = c.Path, matches = c.Matches, detail = c.Detail })
+                });
+            }
+            else
+            {
+                stdout.WriteLine($"Checking interrupted '{result.Journal.Operation}' (backup {result.Journal.BackupId}):");
+                foreach (var check in result.Checks.Where(c => !c.Matches || parse.GetValue(_verbose)))
+                    stdout.WriteLine($"  {(check.Matches ? "ok" : "MISMATCH"),-9} {check.Path} — {check.Detail}");
+                stdout.WriteLine(!result.Verified
+                    ? "Not completed: the operation did not finish writing. Run 'agent-standards rollback' to restore the previous state."
+                    : result.Applied
+                        ? $"Completed: all {result.Checks.Count} change(s) verified; the operation is now finished."
+                        : $"Dry run: all {result.Checks.Count} change(s) verified; 'complete' would finish the operation.");
+            }
+            return Task.FromResult(result.Verified ? ExitOk : ExitError);
         }));
         return command;
     }

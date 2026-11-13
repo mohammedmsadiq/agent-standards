@@ -247,7 +247,7 @@ public static class InstallationValidator
         if (OperationLock.IsHeld(root))
             issues.Add(new(Severity.Warning, OperationLock.RelativePath, "another agent-standards operation is in progress; validate again when it finishes"));
         else if (OperationJournal.Read(root) is { } journal)
-            issues.Add(new(Severity.Error, OperationJournal.RelativePath, $"interrupted '{journal.Operation}' operation; run 'agent-standards rollback'"));
+            issues.Add(new(Severity.Error, OperationJournal.RelativePath, $"interrupted '{journal.Operation}' operation; run 'agent-standards rollback' (undo) or 'agent-standards complete' (keep, if fully written)"));
 
         if (manifest.Scope == InstallScope.Project && manifest.Assistants.Contains("claude"))
         {

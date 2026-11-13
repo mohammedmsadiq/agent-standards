@@ -109,12 +109,15 @@ public static class InstallPlanner
         var reason = old.PendingHash == newHash
             ? $"unresolved conflict: local version kept; merge {ConflictsFolder}/{path}.incoming, then run 'agent-standards resolve {path}'"
             : $"modified locally and changed upstream: local version kept, incoming saved to {ConflictsFolder}/{path}.incoming; merge it, then run 'agent-standards resolve {path}'";
-        return make(PlanActionKind.Conflict, reason, null, WithPending(old, newHash), incoming);
+        // Remember the local content when this conflict (this incoming version) was first reported.
+        var localAtConflict = old.PendingHash == newHash ? old.LocalHashAtConflict : currentHash;
+        return make(PlanActionKind.Conflict, reason, null, WithPending(old, newHash, localAtConflict), incoming);
     }
 
-    private static ManifestFile WithPending(ManifestFile f, string? pending) => new()
+    private static ManifestFile WithPending(ManifestFile f, string? pending, string? localAtConflict = null) => new()
     {
-        Path = f.Path, Mode = f.Mode, Hash = f.Hash, Source = f.Source, JsonKeys = f.JsonKeys, PendingHash = pending
+        Path = f.Path, Mode = f.Mode, Hash = f.Hash, Source = f.Source, JsonKeys = f.JsonKeys,
+        PendingHash = pending, LocalHashAtConflict = pending is null ? null : localAtConflict
     };
 
     public static (string Incoming, string Base) ConflictCopyPaths(string path) =>
