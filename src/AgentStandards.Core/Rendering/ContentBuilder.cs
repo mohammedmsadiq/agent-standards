@@ -24,7 +24,7 @@ public static class ContentBuilder
                 Expand(ctx, "core/agents.md", AgentsFile), "core:agents",
                 Seed: ctx.Templates.Files.GetValueOrDefault("core/agents-seed.md"));
 
-            yield return new RenderedFile(StateGitIgnore, ManagedMode.Whole, "# Local backups, conflict copies and the in-progress journal are machine-specific.\nbackups/\nconflicts/\noperation.json\n", "core:gitignore");
+            yield return new RenderedFile(StateGitIgnore, ManagedMode.Whole, "# Local backups, conflict copies, the in-progress journal and the lock file are machine-specific.\nbackups/\nconflicts/\noperation.json\nlock\n", "core:gitignore");
         }
     }
 

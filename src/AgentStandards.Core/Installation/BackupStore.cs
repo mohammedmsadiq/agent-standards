@@ -15,6 +15,8 @@ public sealed class BackupRecord
     /// <summary>True for the safety snapshot a rollback or resolve takes of itself; hidden from the default rollback target.</summary>
     public bool Internal { get; set; }
     public List<BackupFile> Files { get; set; } = [];
+    /// <summary>Directories the operation created (deepest first); rollback removes them when empty.</summary>
+    public List<string>? CreatedDirectories { get; set; }
 }
 
 public sealed class BackupFile
@@ -42,11 +44,16 @@ public static class BackupStore
     }
 
     /// <summary>Writes the saved originals first and <c>backup.json</c> last, so a record only exists once complete.</summary>
-    public static void Save(string root, BackupRecord record, IReadOnlyDictionary<string, string> originals)
+    public static void Save(string root, BackupRecord record, IReadOnlyDictionary<string, string> originals,
+        Action<string>? beforeFile = null, Action? beforeRecord = null)
     {
         var dir = $"{Folder}/{record.Id}";
         foreach (var (path, content) in originals)
+        {
+            beforeFile?.Invoke(path);
             AtomicFile.WriteText(root, $"{dir}/files/{path}", content);
+        }
+        beforeRecord?.Invoke();
         AtomicFile.WriteText(root, $"{dir}/backup.json", JsonSerializer.Serialize(record, ManifestStore.Options) + "\n");
     }
 
@@ -95,9 +102,28 @@ public static class BackupStore
             Directory.Delete(dir, recursive: true);
     }
 
+    /// <summary>
+    /// Best effort: keeps the newest <see cref="Retain"/> complete backups and removes incomplete leftovers. Never
+    /// removes the backup an interrupted operation still needs. Failures are ignored; trimming is retried next time.
+    /// </summary>
     public static void Trim(string root)
     {
-        foreach (var old in List(root).Skip(Retain))
-            Delete(root, old.Id);
+        try
+        {
+            var needed = OperationJournal.Read(root)?.BackupId;
+            foreach (var old in List(root).Skip(Retain).Where(b => b.Id != needed))
+                Transaction.TryDeleteBackup(root, old.Id);
+
+            var dir = SafePaths.ResolveSafe(root, Folder);
+            foreach (var sub in Directory.Exists(dir) ? Directory.GetDirectories(dir) : [])
+            {
+                var name = Path.GetFileName(sub);
+                if (name != needed && !File.Exists(Path.Combine(sub, "backup.json")))
+                    Transaction.TryDeleteBackup(root, name);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or UnsafePathException)
+        {
+        }
     }
 }

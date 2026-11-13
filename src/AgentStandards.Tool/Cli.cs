@@ -188,11 +188,12 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
                     files = report.Files,
                     conflictCopies = report.PendingConflicts,
                     unresolvedConflicts = report.Files.Where(f => f.State == FileState.Conflict).Select(f => f.Path),
-                    interruptedOperation = report.InterruptedOperation,
+                    interruptedOperation = report.OperationRunning ? null : report.InterruptedOperation,
+                    operationInProgress = report.OperationRunning,
                     unmanagedFiles = report.UnmanagedFiles,
                     backups = report.Backups.Select(b => new { b.Id, b.Operation, b.CreatedAt, b.TemplatesVersionBefore, b.TemplatesVersionAfter })
                 });
-                return Task.FromResult(report.InterruptedOperation is null ? ExitOk : ExitError);
+                return Task.FromResult(report.InterruptedOperation is null || report.OperationRunning ? ExitOk : ExitError);
             }
 
             stdout.WriteLine($"Root:       {report.Root} ({m.Scope.ToString().ToLowerInvariant()} scope)");
@@ -216,12 +217,14 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
                 foreach (var file in report.UnmanagedFiles.Where(_ => parse.GetValue(_verbose)))
                     stdout.WriteLine($"  {"unmanaged",-14} {file}");
             }
-            if (report.InterruptedOperation is { } interrupted)
+            if (report.OperationRunning)
+                stdout.WriteLine("IN PROGRESS: another agent-standards operation is changing this installation; run status again when it finishes.");
+            else if (report.InterruptedOperation is { } interrupted)
                 stdout.WriteLine($"INTERRUPTED: '{interrupted.Operation}' (backup {interrupted.BackupId}) did not finish. Run 'agent-standards rollback' to restore the previous state.");
             if (report.NewerBundledTemplates)
                 stdout.WriteLine($"Update available: templates {report.BundledVersion} (run 'agent-standards update --dry-run').");
             stdout.WriteLine(report.Backups.Count > 0 ? $"Backups:    {report.Backups.Count} (latest {report.Backups[0].Id})" : "Backups:    none");
-            return Task.FromResult(report.InterruptedOperation is null ? ExitOk : ExitError);
+            return Task.FromResult(report.InterruptedOperation is null || report.OperationRunning ? ExitOk : ExitError);
         }));
         return command;
     }
@@ -437,7 +440,12 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
 
             var result = RollbackService.Rollback(root, preview.Backup.Id, dryRun: false, force: parse.GetValue(_force));
             if (json) WriteJson(RollbackJson(result));
-            else stdout.WriteLine(result.Partial ? "Rollback complete (partial: some files were kept)." : "Rollback complete.");
+            else
+            {
+                stdout.WriteLine(result.Partial ? "Rollback complete (partial: some files were kept)." : "Rollback complete.");
+                foreach (var warning in result.Warnings)
+                    stdout.WriteLine($"note: {warning}");
+            }
             return Task.FromResult(result.Partial ? ExitConflicts : ExitOk);
         }));
         return command;
@@ -451,11 +459,12 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
         command.Arguments.Add(paths);
         command.Options.Add(all);
         command.Options.Add(_dryRun);
+        command.Options.Add(_force);
         command.SetAction((parse, _) => Guard(parse, () =>
         {
-            var result = ConflictService.Resolve(Root(parse), parse.GetValue(paths) ?? [], parse.GetValue(all), parse.GetValue(_dryRun));
+            var result = ConflictService.Resolve(Root(parse), parse.GetValue(paths) ?? [], parse.GetValue(all), parse.GetValue(_dryRun), parse.GetValue(_force));
             if (parse.GetValue(_json))
-                WriteJson(new { resolved = result.Resolved, remaining = result.RemainingConflicts, applied = result.Applied, backupId = result.BackupId });
+                WriteJson(new { resolved = result.Resolved, remaining = result.RemainingConflicts, keptCopies = result.KeptCopies, applied = result.Applied, backupId = result.BackupId });
             else
             {
                 foreach (var path in result.Resolved)
@@ -463,6 +472,8 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
                 stdout.WriteLine(result.Resolved.Count == 0 ? "No pending conflicts." :
                     result.Applied ? $"Resolved {result.Resolved.Count} conflict(s); local versions are now the baseline for future updates."
                                    : "Dry run: no files were changed.");
+                foreach (var copy in result.KeptCopies)
+                    stdout.WriteLine($"  kept         {copy} — edited by you; delete it when finished (or re-run with --force)");
                 if (result.RemainingConflicts.Count > 0)
                     stdout.WriteLine($"Still unresolved: {string.Join(", ", result.RemainingConflicts)}");
             }
@@ -480,6 +491,7 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
         applied = r.Applied,
         partial = r.Partial,
         recoversInterruptedOperation = r.RecoversInterruptedOperation,
+        warnings = r.Warnings,
         actions = r.Actions.Select(a => new { kind = RollbackLabel(a.Kind), path = a.Path, reason = a.Reason, forced = a.Forced })
     };
 
@@ -537,7 +549,7 @@ public sealed class Cli(ToolEnvironment environment, TextWriter stdout, TextWrit
         }
         catch (Exception ex) when (ex is TemplateException or ManifestException or UnsafePathException or DirectoryNotFoundException
                                        or InvalidOperationException or ArgumentException or IOException or UnauthorizedAccessException
-                                       or OperationFailedException or InterruptedOperationException)
+                                       or OperationFailedException or InterruptedOperationException or OperationInProgressException)
         {
             return Fail(parse, ex.Message, ex);
         }

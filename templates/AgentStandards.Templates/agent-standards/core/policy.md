@@ -42,4 +42,6 @@ When guidance conflicts, follow the first that applies:
 4. Personal global standards (for example `~/.claude/CLAUDE.md` or `~/.copilot/copilot-instructions.md`).
 5. General industry practice.
 
-The approval rules above apply at every level unless the user explicitly waives one for the current task.
+Project-specific guidance may adapt or replace framework and style recommendations, and the project's documented
+architecture decisions take precedence over generic advice. It cannot relax the approval rules or the security rules
+above (secrets, credentials, production, publishing): only the user can waive one, explicitly, for the current task.

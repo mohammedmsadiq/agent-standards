@@ -7,6 +7,7 @@ using AgentStandards.Core.Templates;
 namespace AgentStandards.Tests;
 
 /// <summary>Regression tests for the pre-release review fixes.</summary>
+[Collection(FaultInjection.Name)]
 public class HardeningTests
 {
     private static (TempDir v1, TempDir v2) Versions(Action<TempDir>? changeV2 = null)
@@ -24,13 +25,13 @@ public class HardeningTests
     }
 
     private static SortedDictionary<string, string> Content(TempDir dir) =>
-        new(Fixtures.Snapshot(dir.Path).Where(kv => !kv.Key.Contains("backups")).ToDictionary(kv => kv.Key, kv => kv.Value == "dir" ? "dir" : kv.Value.Split(':')[2]));
+        new(Fixtures.Snapshot(dir.Path).Where(kv => !kv.Key.Contains("backups") && !kv.Key.EndsWith("agent-standards/lock") && !kv.Key.EndsWith("agent-standards\\lock")).ToDictionary(kv => kv.Key, kv => kv.Value == "dir" ? "dir" : kv.Value.Split(':')[2]));
 
     private static IDisposable FailOn(string root, Func<string, bool> predicate)
     {
-        Transaction.BeforeChange = (r, path) =>
+        Transaction.Fault = (r, stage, path) =>
         {
-            if (r == root && predicate(path))
+            if (r == root && stage == Transaction.Stage.Change && predicate(path!))
                 throw new IOException($"simulated failure writing {path}");
         };
         return new Reset();
@@ -38,7 +39,7 @@ public class HardeningTests
 
     private sealed class Reset : IDisposable
     {
-        public void Dispose() => Transaction.BeforeChange = null;
+        public void Dispose() => Transaction.Fault = null;
     }
 
     // ---- Rollback --------------------------------------------------------------------------------------------

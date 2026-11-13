@@ -139,7 +139,7 @@ public class UpdateTests
 
         h.Repo.Write("CLAUDE.md", "# mine\n");
         await h.Run("init", "--profile", "generic", "--templates", v1.Path);
-        var afterInit = Fixtures.Snapshot(h.Repo.Path).Where(kv => !kv.Key.Contains("backups")).ToDictionary();
+        var afterInit = Fixtures.Snapshot(h.Repo.Path).Where(kv => !kv.Key.Contains("backups") && Path.GetFileName(kv.Key) != "lock").ToDictionary();
         await h.Run("update", "--templates", v2.Path);
         Assert.True(h.Repo.Exists(".claude/rules/csharp.md"));
 
@@ -156,7 +156,7 @@ public class UpdateTests
         Assert.False(h.Repo.Exists(".claude/rules/csharp.md"));
         Assert.DoesNotContain("(v2)", h.Repo.Read(".agent-standards/standards/testing.md"));
         Assert.Equal("1.0.0", ManifestStore.Load(h.Repo.Path)!.Templates.Version);
-        var afterRollback = Fixtures.Snapshot(h.Repo.Path).Where(kv => !kv.Key.Contains("backups")).ToDictionary();
+        var afterRollback = Fixtures.Snapshot(h.Repo.Path).Where(kv => !kv.Key.Contains("backups") && Path.GetFileName(kv.Key) != "lock").ToDictionary();
         Assert.Equal(afterInit.Keys.Order(), afterRollback.Keys.Order());
         foreach (var (k, v) in afterInit.Where(kv => kv.Value != "dir"))
             Assert.Equal(v.Split(':')[2], afterRollback[k].Split(':')[2]);

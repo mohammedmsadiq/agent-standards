@@ -28,7 +28,8 @@ public sealed record StatusReport(
     bool NewerBundledTemplates,
     IReadOnlyList<BackupRecord> Backups,
     OperationJournal? InterruptedOperation,
-    IReadOnlyList<string> UnmanagedFiles);
+    IReadOnlyList<string> UnmanagedFiles,
+    bool OperationRunning = false);
 
 public static class StatusService
 {
@@ -42,7 +43,7 @@ public static class StatusService
             : false;
 
         return new StatusReport(root, manifest, files, PendingConflicts(root), bundledVersion, newer, BackupStore.List(root),
-            OperationJournal.Read(root), UnmanagedFiles(root, manifest));
+            OperationJournal.Read(root), UnmanagedFiles(root, manifest), OperationLock.IsHeld(root));
     }
 
     public static FileState GetState(string root, ManifestFile file, bool ignorePending = false)

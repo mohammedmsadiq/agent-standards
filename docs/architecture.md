@@ -89,27 +89,31 @@ are deleted (or their block removed) and modified ones are untracked but kept.
 ## Transactions and recovery
 
 `InstallPlanner.BuildFileChanges` turns the plan into concrete file changes (managed files, conflict copies, the
-manifest), dropping no-op writes. `Transaction.Run` then:
+manifest), dropping no-op writes. Every writer (`InstallExecutor`, `RollbackService`, `ConflictService`) holds the
+installation's `OperationLock` and calls `Transaction.Run`, which:
 
-1. verifies every file still has the content it had when planned (otherwise aborts without writing);
-2. saves the original content of every file it will change, then `backup.json` (so a backup only exists once
-   complete);
-3. writes the journal `.agent-standards/operation.json`;
-4. applies the changes (each one atomically: temporary file + rename);
-5. deletes the journal.
+| Stage | On failure |
+|---|---|
+| 1. Refuse if another operation's journal exists; verify every file still has the content it had when planned | abort, nothing modified |
+| 2. Save original content of every file it will change, then `backup.json` | partial backup removed, nothing modified |
+| 3. Write the journal `.agent-standards/operation.json` (it records any interrupted journal it is recovering) | unused backup removed, nothing modified |
+| 4. Apply the changes (each atomically: temporary file + rename); the manifest is last | changed files restored (files never reached are left alone), created directories removed if empty, backup removed |
+| 4b. Automatic restore fails | journal and backup kept: the installation is detectably interrupted; `rollback` recovers |
+| 5. Delete the journal | reported as a failure, not success; journal kept so `rollback` can undo |
 
-If step 4 throws, all changes are restored from the backup, the backup is removed and the command fails with a clear
-message. If the process dies, the journal remains: `init`/`update`/`resolve` refuse to run and `rollback` restores
-the journal's backup. Files the interrupted run never reached already have their original content and are reported
-as `already-restored`.
+Plans are made without the lock (so `--dry-run` and interactive confirmation never write); stage 1 re-checks each
+planned file's hash under the lock, so a concurrent change aborts the operation instead of being overwritten.
 
-## Manifest
+`OperationLock` opens `.agent-standards/lock` with `FileShare.None` and never waits. On Windows this is an
+OS-enforced sharing lock; on Linux and macOS .NET takes an exclusive `flock`, which also excludes a second handle in
+the same process. The OS releases it when the process ends, so there are no stale locks.
 
-`.agent-standards/manifest.json` (project) or `~/.agent-standards/manifest.json` (global) records the schema version,
-tool version, scope, templates package ID/version/origin/pin, requested and resolved profiles, assistants,
-exclusions, MCP flag, timestamps, and every managed file with its mode, hash and source. Local modifications are
-computed on demand by `status` rather than stored. A corrupt or newer-schema manifest stops `update`, `status` and
-`validate`; `init --force` replaces it (the corrupt copy is kept in the backup).
+## Conflict copies
+
+`.incoming` and `.base` copies are written under `.agent-standards/conflicts/` and their hashes recorded in the
+manifest (`conflictCopies`). A copy whose content no longer matches its recorded hash has been edited and is never
+overwritten or deleted without `--force`; updates report that it was kept. Rollback treats copies like any other
+file (edited copies are kept, and their tracking survives a partial rollback).
 
 ## Backups and rollback
 

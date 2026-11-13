@@ -120,20 +120,19 @@ public static class InstallPlanner
     public static (string Incoming, string Base) ConflictCopyPaths(string path) =>
         ($"{ConflictsFolder}/{path}.incoming", $"{ConflictsFolder}/{path}.base");
 
+    public sealed record FileChangeSet(List<FileChange> Changes, Dictionary<string, string> ConflictCopies, List<string> Warnings);
+
     /// <summary>
-    /// Translates plan actions into concrete file changes: managed files, conflict copies (written for conflicts,
-    /// removed once a path is no longer in conflict). Changes that would not alter a file are dropped.
+    /// Translates plan actions into concrete file changes: managed files plus conflict copies (written for
+    /// conflicts, removed once a path is no longer in conflict). Changes that would not alter a file are dropped.
+    /// Conflict copies the developer edited are kept unless <paramref name="force"/> is set.
     /// </summary>
-    public static List<FileChange> BuildFileChanges(string root, IReadOnlyList<PlanAction> actions)
+    public static FileChangeSet BuildFileChanges(string root, IReadOnlyList<PlanAction> actions, IReadOnlyDictionary<string, string>? previousCopies, bool force)
     {
         var changes = new List<FileChange>();
-        void Add(string path, string? after)
-        {
-            var current = AtomicFile.ReadTextOrNull(root, path);
-            if (current == after)
-                return;
-            changes.Add(new FileChange(path, after, current is null ? Transaction.Absent : ContentHash.Compute(current)));
-        }
+        var copies = new Dictionary<string, string>(StringComparer.Ordinal);
+        var warnings = new List<string>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var action in actions)
         {
@@ -143,21 +142,72 @@ public static class InstallPlanner
                 changes.Add(new FileChange(action.Path, null, Expected(action.Before)));
 
             var (incomingPath, basePath) = ConflictCopyPaths(action.Path);
+            visited.Add(incomingPath);
+            visited.Add(basePath);
             if (action.Kind == PlanActionKind.Conflict)
             {
-                Add(incomingPath, action.Incoming);
+                WriteCopy(root, incomingPath, action.Incoming, previousCopies, force, changes, copies, warnings);
                 // The baseline can only be rebuilt on the first report (the manifest then moves to the new template
                 // version), so an existing .base copy is kept while the conflict stays pending.
                 if (action.BaseContent is not null)
-                    Add(basePath, action.BaseContent);
+                    WriteCopy(root, basePath, action.BaseContent, previousCopies, force, changes, copies, warnings);
+                else if (previousCopies?.TryGetValue(basePath, out var hash) == true && AtomicFile.ReadTextOrNull(root, basePath) is not null)
+                    copies[basePath] = hash;
             }
             else
             {
-                Add(incomingPath, null);
-                Add(basePath, null);
+                RemoveCopy(root, incomingPath, previousCopies, force, changes, copies, warnings);
+                RemoveCopy(root, basePath, previousCopies, force, changes, copies, warnings);
             }
         }
-        return changes;
+
+        // Copies recorded for paths that are no longer planned at all (for example an excluded item).
+        foreach (var path in previousCopies?.Keys.Where(k => !visited.Contains(k)) ?? [])
+            RemoveCopy(root, path, previousCopies, force, changes, copies, warnings);
+
+        return new FileChangeSet(changes, copies, warnings);
+    }
+
+    /// <summary>True when the copy still has exactly the content the toolkit wrote.</summary>
+    internal static bool IsUnmodifiedCopy(string current, string path, IReadOnlyDictionary<string, string>? recorded) =>
+        recorded?.TryGetValue(path, out var hash) == true && hash == ContentHash.Compute(current);
+
+    private static void WriteCopy(string root, string path, string? content, IReadOnlyDictionary<string, string>? previous, bool force,
+        List<FileChange> changes, Dictionary<string, string> copies, List<string> warnings)
+    {
+        if (content is null)
+            return;
+        var current = AtomicFile.ReadTextOrNull(root, path);
+        if (current == content)
+        {
+            copies[path] = ContentHash.Compute(content);
+            return;
+        }
+        if (current is null || force || IsUnmodifiedCopy(current, path, previous))
+        {
+            changes.Add(new FileChange(path, content, current is null ? Transaction.Absent : ContentHash.Compute(current)));
+            copies[path] = ContentHash.Compute(content);
+            return;
+        }
+        if (previous?.TryGetValue(path, out var hash) == true)
+            copies[path] = hash;
+        warnings.Add($"Kept your edited conflict copy {path}; the latest incoming version was not written. Delete the copy (or use --force) and re-run update to refresh it.");
+    }
+
+    private static void RemoveCopy(string root, string path, IReadOnlyDictionary<string, string>? previous, bool force,
+        List<FileChange> changes, Dictionary<string, string> copies, List<string> warnings)
+    {
+        var current = AtomicFile.ReadTextOrNull(root, path);
+        if (current is null)
+            return;
+        if (force || IsUnmodifiedCopy(current, path, previous))
+        {
+            changes.Add(new FileChange(path, null, ContentHash.Compute(current)));
+            return;
+        }
+        if (previous?.TryGetValue(path, out var hash) == true)
+            copies[path] = hash;
+        warnings.Add($"Kept {path} because it was edited; delete it yourself once your merge is done (or use --force).");
     }
 
     private static string Expected(string? before) => before is null ? Transaction.Absent : ContentHash.Compute(before);

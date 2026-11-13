@@ -24,6 +24,11 @@ public sealed class Manifest
     public DateTimeOffset InstalledAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
     public List<ManifestFile> Files { get; set; } = [];
+    /// <summary>
+    /// Conflict copies the toolkit wrote (path → hash written). A copy whose content no longer matches has been
+    /// edited by the developer and is never overwritten or deleted without --force.
+    /// </summary>
+    public Dictionary<string, string>? ConflictCopies { get; set; }
 }
 
 public sealed class TemplatesInfo

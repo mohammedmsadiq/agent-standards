@@ -10,7 +10,8 @@ public static class InstallExecutor
         if (plan.Changes.Count == 0)
             return new ExecutionResult(null, [], [], []);
 
-        var id = Transaction.Run(plan.Root, operation, plan.Changes, new BackupRecord
+        using var held = OperationLock.Acquire(plan.Root, operation);
+        var id = Transaction.Run(held, plan.Root, operation, plan.Changes, new BackupRecord
         {
             TemplatesVersionBefore = previousTemplatesVersion,
             TemplatesVersionAfter = plan.Manifest.Templates.Version

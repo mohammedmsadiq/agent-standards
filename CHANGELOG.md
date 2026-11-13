@@ -7,6 +7,19 @@ and the project uses [Semantic Versioning](https://semver.org/).
 
 ## [0.1.0-preview.1] - unreleased
 
+### Changed (final pre-release review)
+
+- Exclusive cross-process operation lock (`.agent-standards/lock`) for `init`, `update`, `resolve` and `rollback`;
+  concurrent writers fail fast with a clear message; read-only commands report operations in progress.
+- Conflict copies are tracked by hash; edited `.incoming`/`.base` copies are never overwritten or deleted without
+  `--force` (`resolve --force` added).
+- Transactions: failures while writing the backup or journal leave nothing behind; journal-cleanup failures are
+  reported instead of success; automatic restore only touches files the operation changed and removes directories
+  it created; recovering an interrupted recovery restores the original interruption; backup trimming is best effort
+  and never removes a backup an interrupted operation needs. Rollback prints its warnings.
+- `init --global`/`update --global` warn when `CLAUDE_CONFIG_DIR` or `COPILOT_HOME` is set.
+- Policy: project guidance can override framework recommendations but cannot relax approval or security rules.
+
 ### Changed (pre-release review)
 
 - Conflicts now stay pending (manifest `pendingHash`) until resolved instead of being cleared after one report;

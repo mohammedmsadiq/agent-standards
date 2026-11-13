@@ -244,7 +244,9 @@ public static class InstallationValidator
 
         foreach (var pending in ConflictService.Pending(manifest))
             issues.Add(new(Severity.Warning, pending.Path, "unresolved conflict: merge the incoming copy, then run 'agent-standards resolve'"));
-        if (OperationJournal.Read(root) is { } journal)
+        if (OperationLock.IsHeld(root))
+            issues.Add(new(Severity.Warning, OperationLock.RelativePath, "another agent-standards operation is in progress; validate again when it finishes"));
+        else if (OperationJournal.Read(root) is { } journal)
             issues.Add(new(Severity.Error, OperationJournal.RelativePath, $"interrupted '{journal.Operation}' operation; run 'agent-standards rollback'"));
 
         if (manifest.Scope == InstallScope.Project && manifest.Assistants.Contains("claude"))

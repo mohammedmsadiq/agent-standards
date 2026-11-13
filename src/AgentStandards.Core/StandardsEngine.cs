@@ -64,6 +64,8 @@ public sealed class StandardsEngine(ToolEnvironment environment)
             throw new UnsafePathException(RenderContext.StateFolder, "the state folder is a symbolic link");
         if (request.Scope == InstallScope.Project)
             EnsureNotGlobalConfiguration(root);
+        if (OperationJournal.Read(root) is not null && OperationLock.IsHeld(root))
+            throw new OperationInProgressException($"Another agent-standards operation is running on '{root}'. Wait for it to finish, then retry.");
         if (OperationJournal.Read(root) is { } journal)
             throw new InterruptedOperationException(
                 $"An interrupted '{journal.Operation}' operation (backup {journal.BackupId}) was found in '{root}'. " +
@@ -89,6 +91,9 @@ public sealed class StandardsEngine(ToolEnvironment environment)
             messages.Add("Standards are already installed here; applying as an update with the given options.");
         if (previous is not null && previous.Scope != request.Scope)
             throw new ManifestException($"The manifest in '{root}' is for {previous.Scope} scope, not {request.Scope}.");
+
+        if (request.Scope == InstallScope.Global)
+            messages.AddRange(GlobalLocationWarnings());
 
         var templateRequest = BuildTemplateRequest(request, previous, root, messages, out var pinned);
         var templates = await Resolver.ResolveAsync(templateRequest, ct);
@@ -153,7 +158,10 @@ public sealed class StandardsEngine(ToolEnvironment environment)
         if (previous is not null && actions.Any(a => a.Kind == PlanActionKind.Conflict && a.Entry is not null))
             await AddConflictBaselinesAsync(root, previous, actions, ct);
 
-        var changes = InstallPlanner.BuildFileChanges(root, actions);
+        var changeSet = InstallPlanner.BuildFileChanges(root, actions, previous?.ConflictCopies, request.Force);
+        var changes = changeSet.Changes;
+        messages.AddRange(changeSet.Warnings);
+        manifest.ConflictCopies = changeSet.ConflictCopies.Count > 0 ? changeSet.ConflictCopies : null;
         if (changes.Count > 0)
             manifest.UpdatedAt = now;
         var manifestText = ManifestStore.Serialize(manifest);
@@ -236,6 +244,18 @@ public sealed class StandardsEngine(ToolEnvironment environment)
             ConfigRoot = root,
             AllowCacheWrite = !request.DryRun
         };
+    }
+
+    /// <summary>
+    /// Documented overrides that move an assistant's configuration elsewhere. They are not followed (see
+    /// docs/assistants.md), so warn that the global files may not be where that assistant looks.
+    /// </summary>
+    public static IEnumerable<string> GlobalLocationWarnings()
+    {
+        if (System.Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") is { Length: > 0 } claude)
+            yield return $"CLAUDE_CONFIG_DIR is set ({claude}). Claude Code documents it for settings, history and plugins, not for CLAUDE.md, rules, skills or agents, so personal standards are still written to ~/.claude. Check they load with /context in Claude Code.";
+        if (System.Environment.GetEnvironmentVariable("COPILOT_HOME") is { Length: > 0 } copilot)
+            yield return $"COPILOT_HOME is set ({copilot}). Copilot CLI reads its configuration there, but VS Code reads personal instructions, skills and agents from ~/.copilot, where they are written.";
     }
 
     /// <summary>

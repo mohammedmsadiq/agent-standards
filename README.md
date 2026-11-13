@@ -22,8 +22,8 @@ others. It is distributed as a .NET tool, but it manages repositories in any lan
 - **Safe updates:** a manifest records every managed file and its hash. Local edits are never overwritten without
   `--force`; unknown files are never touched; obsolete files are removed only with `--prune`. Conflicts stay visible
   until you resolve them.
-- **Transactional:** every change is backed up first and applied as one unit; a failure part-way is reverted
-  automatically, and an interrupted run is detected and recoverable with `rollback`.
+- **Transactional and locked:** every change is backed up first and applied as one unit under an exclusive lock; a
+  failure part-way is reverted automatically, and an interrupted run is detected and recoverable with `rollback`.
 - **Dry-run, diff, rollback and version pinning**, project and global (per-user) scopes.
 - **Offline:** the tool bundles the templates matching its version; other versions come from your NuGet sources, a
   local folder or the NuGet global packages folder.
@@ -189,6 +189,10 @@ A conflict keeps your local file and saves, under `.agent-standards/conflicts/`:
 - `<path>.incoming` — the new template version;
 - `<path>.base` — the previously applied version, when it can be rebuilt offline (bundled, cached or directory templates).
 
+The copies are yours to edit while merging: the tool records what it wrote and never overwrites or deletes a copy
+you changed (it says so instead); `--force` on `update` or `resolve` removes edited copies too. Delete an edited
+copy yourself to get a fresh one on the next `update`.
+
 The conflict stays pending — shown by `status`, `doctor` and `validate`, and every `update` exits with code 2 — until:
 
 - you merge what you want from `.incoming` into your file and run `agent-standards resolve <path>` (or
@@ -219,8 +223,24 @@ Every operation that changes files (`init`, `update`, `resolve`, `rollback`) fir
   command exits 1 and says so.
 - **If the process is killed** part-way, the journal remains. `status` and `validate` exit 1, `doctor` reports it,
   and `init`/`update` refuse to run until you recover with `agent-standards rollback`.
+- **If writing the backup or the journal fails**, nothing has been modified and the unused backup is removed.
+- **If the journal cannot be removed** after all changes were written, the command exits 1 (it does not report
+  success) and the installation is marked as interrupted: run `rollback` to undo, or delete the journal to keep it.
+- **If a recovery is itself interrupted**, rolling it back restores the original interrupted state and its journal;
+  run `rollback` again to finish. Recovery is safe to repeat.
 - **If the journal's backup is missing**, check the files with `git status`, restore from version control if needed,
   then delete `.agent-standards/operation.json`.
+
+### Concurrent operations
+
+Commands that change an installation (`init`, `update`, `resolve`, `rollback`) take an exclusive lock on
+`.agent-standards/lock` (in the home directory for `--global`). A second command fails at once with "Another
+agent-standards operation is running" instead of waiting, so processes cannot deadlock. The lock is an open file
+handle (`FileShare.None`: a sharing lock on Windows, `flock` on Linux and macOS), so the operating system releases it
+when a process exits or crashes; a leftover `lock` file never blocks anything. Read-only commands (`status`,
+`validate`, `doctor`, `diff`, `list`, and every `--dry-run`) do not take the lock and report an operation in
+progress instead of an interrupted one. The lock protects one machine; it is not designed for repositories shared
+over network file systems.
 
 ```bash
 agent-standards rollback --list
@@ -265,7 +285,7 @@ Exit codes: `0` success; `1` error, validation failure or interrupted operation;
 - No automatic line-level three-way merge; conflicts produce `.incoming`/`.base` copies for manual merging.
 - Global scope always writes to `~/.claude` and `~/.copilot` (or under `AGENT_STANDARDS_HOME`). `CLAUDE_CONFIG_DIR`
   and `COPILOT_HOME` are not followed because the assistants do not document them consistently for instructions,
-  skills and agents; `doctor` warns when they are set. Project installs in the home directory are refused because
+  skills and agents; `init --global`, `update --global` and `doctor` warn when they are set. Project installs in the home directory are refused because
   they would modify the global configuration.
 - No MCP servers are bundled. Only Claude Code's `.mcp.json` is generated; Copilot MCP configuration is not.
 - Copilot surfaces that do not read `AGENTS.md` see the core policy from `copilot-instructions.md` but not the
@@ -277,6 +297,7 @@ Exit codes: `0` success; `1` error, validation failure or interrupted operation;
   `doctor` reports when the limit is reached. Use `--profile` to override.
 - Conflict copies are git-ignored, so a pending conflict recorded in a committed manifest has no copy on another
   machine; re-run `update` there to regenerate it.
+- Operation locking covers processes on one machine, not network file systems shared between machines.
 - No package icon yet.
 
 ## Building from source

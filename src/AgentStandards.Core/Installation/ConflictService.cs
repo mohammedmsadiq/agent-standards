@@ -2,7 +2,11 @@ using AgentStandards.Core.IO;
 
 namespace AgentStandards.Core.Installation;
 
-public sealed record ResolveResult(IReadOnlyList<string> Resolved, IReadOnlyList<string> RemainingConflicts, bool Applied, string? BackupId);
+public sealed record ResolveResult(IReadOnlyList<string> Resolved, IReadOnlyList<string> RemainingConflicts, bool Applied, string? BackupId)
+{
+    /// <summary>Conflict copies kept because the developer edited them.</summary>
+    public IReadOnlyList<string> KeptCopies { get; init; } = [];
+}
 
 /// <summary>
 /// Marks pending conflicts as resolved: the current local content is accepted as the merge result, the incoming
@@ -12,7 +16,15 @@ public static class ConflictService
 {
     public static IReadOnlyList<ManifestFile> Pending(Manifest manifest) => manifest.Files.Where(f => f.PendingHash is not null).ToList();
 
-    public static ResolveResult Resolve(string root, IReadOnlyList<string> paths, bool all, bool dryRun)
+    public static ResolveResult Resolve(string root, IReadOnlyList<string> paths, bool all, bool dryRun, bool force = false)
+    {
+        if (dryRun)
+            return ResolveCore(null, root, paths, all, force);
+        using var held = OperationLock.Acquire(root, "resolve");
+        return ResolveCore(held, root, paths, all, force);
+    }
+
+    private static ResolveResult ResolveCore(OperationLock? held, string root, IReadOnlyList<string> paths, bool all, bool force)
     {
         if (OperationJournal.Read(root) is { } journal)
             throw new InterruptedOperationException($"An interrupted '{journal.Operation}' operation was found. Run 'agent-standards rollback' first.");
@@ -42,28 +54,45 @@ public static class ConflictService
 
         var resolved = selected.Select(f => f.Path).ToList();
         var remaining = pending.Keys.Except(resolved, StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal).ToList();
-        if (dryRun || selected.Count == 0)
+        if (held is null || selected.Count == 0)
             return new ResolveResult(resolved, remaining, false, null);
 
         var changes = new List<FileChange>();
+        var kept = new List<string>();
+        var copies = new Dictionary<string, string>(manifest.ConflictCopies ?? [], StringComparer.Ordinal);
         foreach (var entry in selected)
         {
             entry.Hash = entry.PendingHash!;
             entry.PendingHash = null;
             var (incoming, basePath) = InstallPlanner.ConflictCopyPaths(entry.Path);
             foreach (var copy in new[] { incoming, basePath })
-                if (AtomicFile.ReadTextOrNull(root, copy) is { } text)
+            {
+                if (AtomicFile.ReadTextOrNull(root, copy) is not { } text)
+                {
+                    copies.Remove(copy);
+                    continue;
+                }
+                if (force || InstallPlanner.IsUnmodifiedCopy(text, copy, manifest.ConflictCopies))
+                {
                     changes.Add(new FileChange(copy, null, ContentHash.Compute(text)));
+                    copies.Remove(copy);
+                }
+                else
+                {
+                    kept.Add(copy);
+                }
+            }
         }
+        manifest.ConflictCopies = copies.Count > 0 ? copies : null;
         manifest.UpdatedAt = DateTimeOffset.UtcNow;
         changes.Add(new FileChange(Manifest.RelativePath, ManifestStore.Serialize(manifest), ContentHash.Compute(manifestText!)));
 
-        var id = Transaction.Run(root, "resolve", changes, new BackupRecord
+        var id = Transaction.Run(held, root, "resolve", changes, new BackupRecord
         {
             TemplatesVersionBefore = manifest.Templates.Version,
             TemplatesVersionAfter = manifest.Templates.Version
         }, DateTimeOffset.UtcNow);
         BackupStore.Trim(root);
-        return new ResolveResult(resolved, remaining, true, id);
+        return new ResolveResult(resolved, remaining, true, id) { KeptCopies = kept };
     }
 }

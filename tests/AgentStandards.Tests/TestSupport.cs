@@ -139,9 +139,12 @@ public static class Fixtures
         foreach (var entry in new DirectoryInfo(root).EnumerateFileSystemInfos("*", SearchOption.AllDirectories))
         {
             var rel = Path.GetRelativePath(root, entry.FullName);
-            result[rel] = entry is FileInfo f
-                ? $"{f.Length}:{f.LastWriteTimeUtc.Ticks}:{Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f.FullName)))}"
-                : "dir";
+            // The lock file cannot be read while another handle holds it; record its presence only.
+            result[rel] = entry is FileInfo { Name: "lock" } lockFile && lockFile.Directory?.Name == ".agent-standards"
+                ? "lock"
+                : entry is FileInfo f
+                    ? $"{f.Length}:{f.LastWriteTimeUtc.Ticks}:{Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(f.FullName)))}"
+                    : "dir";
         }
         return result;
     }

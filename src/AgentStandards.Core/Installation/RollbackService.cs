@@ -19,7 +19,11 @@ public enum RollbackActionKind
 
 public sealed record RollbackAction(RollbackActionKind Kind, string Path, string Reason, bool Forced = false);
 
-public sealed record RollbackResult(BackupRecord Backup, IReadOnlyList<RollbackAction> Actions, bool Applied, bool Partial, bool RecoversInterruptedOperation);
+public sealed record RollbackResult(BackupRecord Backup, IReadOnlyList<RollbackAction> Actions, bool Applied, bool Partial, bool RecoversInterruptedOperation)
+{
+    /// <summary>Non-fatal follow-ups, for example a consumed backup that could not be removed.</summary>
+    public IReadOnlyList<string> Warnings { get; init; } = [];
+}
 
 /// <summary>
 /// Reverts the most recent (or a named) operation from its backup. The rollback itself runs as a
@@ -28,6 +32,14 @@ public sealed record RollbackResult(BackupRecord Backup, IReadOnlyList<RollbackA
 public static class RollbackService
 {
     public static RollbackResult Rollback(string root, string? backupId, bool dryRun, bool force)
+    {
+        if (dryRun)
+            return RollbackCore(null, root, backupId, force);
+        using var held = OperationLock.Acquire(root, "rollback");
+        return RollbackCore(held, root, backupId, force);
+    }
+
+    private static RollbackResult RollbackCore(OperationLock? held, string root, string? backupId, bool force)
     {
         var journal = OperationJournal.Read(root);
         BackupRecord backup;
@@ -97,27 +109,40 @@ public static class RollbackService
             changes.Add(new FileChange(Manifest.RelativePath, targetManifest, currentManifest is null ? Transaction.Absent : ContentHash.Compute(currentManifest)));
         }
 
-        var result = new RollbackResult(backup, actions, Applied: !dryRun, Partial: skipped.Count > 0, recovering);
-        if (dryRun)
+        var result = new RollbackResult(backup, actions, Applied: held is not null, Partial: skipped.Count > 0, recovering);
+        if (held is null)
             return result;
 
+        var warnings = new List<string>();
         if (changes.Count > 0)
         {
-            var safety = Transaction.Run(root, "rollback", changes, new BackupRecord
+            var safety = Transaction.Run(held, root, "rollback", changes, new BackupRecord
             {
                 Internal = true,
                 TemplatesVersionBefore = backup.TemplatesVersionAfter,
                 TemplatesVersionAfter = backup.TemplatesVersionBefore
-            }, DateTimeOffset.UtcNow);
-            BackupStore.Delete(root, safety);
+            }, DateTimeOffset.UtcNow, recoveringBackupId: recovering ? backup.Id : null);
+            if (!Transaction.TryDeleteBackup(root, safety))
+                warnings.Add($"Could not remove the internal safety backup {safety}; it is harmless and will be trimmed later.");
         }
-        else if (journal is not null)
+        else if (recovering)
         {
             AtomicFile.Delete(root, OperationJournal.RelativePath);
         }
 
-        BackupStore.Delete(root, backup.Id);
-        return result;
+        Transaction.RemoveEmptyDirectories(root, backup.CreatedDirectories);
+
+        // Recovering a rollback that was itself interrupted puts back the journal of the operation it was recovering,
+        // so that original interruption stays visible and can be recovered next.
+        if (recovering && journal!.Previous is { } previous)
+        {
+            OperationJournal.Write(root, previous);
+            warnings.Add($"The interrupted '{previous.Operation}' operation it was recovering is still pending; run 'agent-standards rollback' again.");
+        }
+
+        if (!Transaction.TryDeleteBackup(root, backup.Id))
+            warnings.Add($"Could not remove the consumed backup {backup.Id}; rolling back again is safe and will only remove it.");
+        return result with { Warnings = warnings };
     }
 
     private static bool SameContent(string? a, string? b) =>
@@ -138,7 +163,8 @@ public static class RollbackService
             if (current is null)
                 return null;
             current.Files = current.Files.Where(f => f is not null && keptPaths.Contains(f.Path)).ToList();
-            return current.Files.Count == 0 ? null : ManifestStore.Serialize(current);
+            current.ConflictCopies = current.ConflictCopies?.Where(c => keptPaths.Contains(c.Key)).ToDictionary(c => c.Key, c => c.Value) is { Count: > 0 } kept ? kept : null;
+            return current.Files.Count == 0 && current.ConflictCopies is null ? null : ManifestStore.Serialize(current);
         }
 
         prior.Files = prior.Files.Where(f => f is not null && !keptPaths.Contains(f.Path)).ToList();
@@ -146,6 +172,16 @@ public static class RollbackService
             if (currentEntries.TryGetValue(path, out var entry))
                 prior.Files.Add(entry);
         prior.Files = prior.Files.OrderBy(f => f.Path, StringComparer.Ordinal).ToList();
+
+        // Kept conflict copies keep the hash describing their current state.
+        var copies = new Dictionary<string, string>(prior.ConflictCopies ?? [], StringComparer.Ordinal);
+        foreach (var path in keptPaths)
+        {
+            copies.Remove(path);
+            if (current?.ConflictCopies?.TryGetValue(path, out var hash) == true)
+                copies[path] = hash;
+        }
+        prior.ConflictCopies = copies.Count > 0 ? copies : null;
         return ManifestStore.Serialize(prior);
     }
 
